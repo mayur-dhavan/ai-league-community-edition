@@ -99,7 +99,7 @@ def get_coins_path(game_map, rows, cols, start, treasure):
             cr, cc, p = queue.popleft()
             if board[cr][cc] in COLLECTIBLE_COINS and (cr, cc) != (r, c):
                 dist = max(len(p), 1)
-                targets.append((dist, p, cr, cc))  
+                targets.append((dist, p, cr, cc))
             for dr, dc, move in DIRECTIONS:
                 nr, nc = cr + dr, cc + dc
                 if 0 <= nr < rows and 0 <= nc < cols and board[nr][nc] != 'wall' and (nr, nc) not in visited:
