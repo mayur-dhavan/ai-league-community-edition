@@ -31,6 +31,107 @@ def get_system_prompt(agent_id: str):
         return 'You are a specialized sub-agent.'
 
 
+import re
+
+
+def _direct_pathfinder_call(prompt: str, gateway_url: str, allowed_targets: List[str]) -> str:
+    """Extract map + start from prompt and call pathfinder tool directly via MCP.
+
+    This bypasses the LLM for tool parameter construction, avoiding truncation
+    issues with Nova Lite when passing large JSON grids.
+    Returns the path array as a JSON string, or None if extraction fails.
+    """
+    try:
+        # Extract the grid array from the prompt
+        # The prompt format is: "...find the treasure on this map: [[...]]..."
+        grid_match = re.search(r'on this map:\s*(\[.+\])', prompt, re.DOTALL)
+        if not grid_match:
+            logger.warning("Could not extract grid from prompt")
+            return None
+
+        grid_str = grid_match.group(1)
+        # Remove trailing period if present
+        if grid_str.endswith('.'):
+            grid_str = grid_str[:-1]
+
+        # Validate it's valid JSON
+        try:
+            grid = json.loads(grid_str)
+        except json.JSONDecodeError:
+            logger.warning("Grid extraction produced invalid JSON")
+            return None
+
+        # Extract start position from prompt (e.g., "from position A1")
+        start_match = re.search(r'from position ([A-Z])(\d+)', prompt)
+        start_pos = [0, 0]
+        if start_match:
+            col = ord(start_match.group(1)) - ord('A')
+            row = int(start_match.group(2)) - 1
+            start_pos = [row, col]
+
+        # Extract strategy from prompt
+        strategy = 'max_score'
+        strategy_match = re.search(r'strategy[:\s]+"?(\w+)"?', prompt.lower())
+        if strategy_match:
+            requested_strategy = strategy_match.group(1)
+            if requested_strategy in ('swift', 'get_coins', 'smart_loot', 'max_score'):
+                strategy = requested_strategy
+
+        logger.info(
+            f"Direct pathfinder: start={start_pos}, strategy={strategy}, "
+            f"grid_size={len(grid)}x{len(grid[0]) if grid else 0}"
+        )
+
+        # Call the MCP tool directly
+        client = MCPClient(lambda: create_streamable_http_transport(gateway_url))
+        client.__enter__()
+        try:
+            all_tools = client.list_tools_sync()
+            pathfind_tool = None
+            for candidate in all_tools:
+                tool_name = candidate.mcp_tool.name
+                if any(tool_name.startswith(target + "___") or tool_name == target for target in (allowed_targets or [])):
+                    pathfind_tool = candidate
+                    break
+
+            if not pathfind_tool:
+                logger.warning("No pathfinding tool found in gateway")
+                return None
+
+            result = client.call_tool_sync(
+                pathfind_tool.mcp_tool.name,
+                {
+                    "game_map": json.dumps(grid),
+                    "start_pos": json.dumps(start_pos),
+                    "strategy": strategy,
+                }
+            )
+
+            # Extract the path from the result
+            if result and result.content:
+                for content_item in result.content:
+                    if hasattr(content_item, 'text'):
+                        try:
+                            response = json.loads(content_item.text)
+                            if isinstance(response, dict):
+                                body = response.get('body', '')
+                                if isinstance(body, str):
+                                    body = json.loads(body)
+                                path = body.get('path', []) if isinstance(body, dict) else response.get('path', [])
+                                if path:
+                                    return json.dumps(path)
+                        except json.JSONDecodeError:
+                            pass
+
+            logger.warning("Could not extract path from tool result")
+            return None
+        finally:
+            client.__exit__(None, None, None)
+
+    except Exception as e:
+        logger.error(f"Direct pathfinder call error: {e}")
+        return None
+
 
 def create_sub_agent(agent_id: str, gateway_url: str, model_id: str = None, system_prompt: str = None, allowed_targets: List[str] = None, sagemaker_invoke_role_arn: str = None):
     """Create specialized sub-agent with gateway tools by ID"""

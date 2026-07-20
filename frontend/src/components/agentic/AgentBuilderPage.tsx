@@ -1011,11 +1011,15 @@ export default function AgentBuilderPage() {
                       />
                       <SpaceBetween size="s">
                         <Header variant="h3">Create Memory</Header>
-                        <FormField label="Name">
+                        <FormField
+                          label="Name"
+                          constraintText="Must start with a letter, followed by letters, numbers, or underscores (max 48 chars). No spaces."
+                          errorText={memoryFormName && !/^[a-zA-Z][a-zA-Z0-9_]{0,47}$/.test(memoryFormName.trim()) ? 'Invalid name format' : undefined}
+                        >
                           <Input
                             value={memoryFormName}
                             onChange={({ detail }) => setMemoryFormName(detail.value)}
-                            placeholder="e.g., Game Memory"
+                            placeholder="e.g., GameMemory"
                             ariaLabel="Memory tool name"
                           />
                         </FormField>
@@ -1031,7 +1035,7 @@ export default function AgentBuilderPage() {
                           variant="primary"
                           onClick={handleCreateMemory}
                           loading={savingMemory}
-                          disabled={!memoryFormName.trim()}
+                          disabled={!memoryFormName.trim() || !/^[a-zA-Z][a-zA-Z0-9_]{0,47}$/.test(memoryFormName.trim())}
                         >
                           Create Memory
                         </Button>
@@ -1074,37 +1078,41 @@ export default function AgentBuilderPage() {
                                       setGuardrailFormBlockedInput(sdk.blockedInputMessaging || 'I cannot help with that request.');
                                       setGuardrailFormBlockedOutput(sdk.blockedOutputsMessaging || 'I cannot help with that request.');
                                       // Load content filters (Bedrock get_guardrail returns "filters", create uses "filtersConfig")
-                                      const filters = sdk.contentPolicy?.filtersConfig || sdk.contentPolicy?.filters || [];
+                                      const filtersConfig = sdk.contentPolicy?.filtersConfig;
+                                      const filters = Array.isArray(filtersConfig) && filtersConfig.length > 0
+                                        ? filtersConfig
+                                        : sdk.contentPolicy?.filters || [];
                                       const FILTER_LABELS: Record<string, string> = {
                                         SEXUAL: 'Sexual Content', VIOLENCE: 'Violence', HATE: 'Hate',
                                         INSULTS: 'Insults', MISCONDUCT: 'Misconduct', PROMPT_ATTACK: 'Prompt Attack',
                                       };
                                       const ALL_FILTER_TYPES = ['SEXUAL', 'VIOLENCE', 'HATE', 'INSULTS', 'MISCONDUCT', 'PROMPT_ATTACK'];
-                                      // Build a map of saved filters
                                       const savedMap = new Map(filters.map((f: { type: string; inputStrength: string; outputStrength: string }) => [f.type, f]));
-                                      // Merge: show all filter types, mark saved ones as enabled
                                       setGuardrailContentFilters(ALL_FILTER_TYPES.map((type) => {
                                         const saved = savedMap.get(type) as { type: string; inputStrength: string; outputStrength: string } | undefined;
                                         if (saved) {
                                           return {
                                             type,
                                             label: FILTER_LABELS[type] || type,
-                                            inputStrength: saved.inputStrength || 'HIGH',
+                                            inputStrength: saved.inputStrength || 'NONE',
                                             outputStrength: saved.outputStrength || 'NONE',
-                                            inputEnabled: saved.inputStrength !== 'NONE',
-                                            outputEnabled: type === 'PROMPT_ATTACK' ? false : saved.outputStrength !== 'NONE',
+                                            inputEnabled: (saved.inputStrength || 'NONE') !== 'NONE',
+                                            outputEnabled: type === 'PROMPT_ATTACK' ? false : (saved.outputStrength || 'NONE') !== 'NONE',
                                           };
                                         }
                                         return { type, label: FILTER_LABELS[type] || type, inputStrength: 'NONE', outputStrength: 'NONE', inputEnabled: false, outputEnabled: false };
                                       }));
                                       // Load deny topics (Bedrock get_guardrail returns "topics", create uses "topicsConfig")
-                                      const topics = sdk.topicPolicy?.topicsConfig || sdk.topicPolicy?.topics || [];
+                                      const topicsConfig = sdk.topicPolicy?.topicsConfig;
+                                      const topics = Array.isArray(topicsConfig) && topicsConfig.length > 0
+                                        ? topicsConfig
+                                        : sdk.topicPolicy?.topics || [];
                                       if (topics.length > 0) {
                                         setGuardrailDenyTopics(topics.map((t: { name: string; definition: string; inputAction?: string; outputAction?: string; examples?: string[]; samplePhrases?: string[] }) => ({
                                           name: t.name || '',
                                           definition: t.definition || '',
-                                          inputAction: t.inputAction || 'BLOCK',
-                                          outputAction: t.outputAction || 'BLOCK',
+                                          inputAction: t.inputAction === 'LOG' ? 'LOG' : 'BLOCK',
+                                          outputAction: t.outputAction === 'LOG' ? 'LOG' : 'BLOCK',
                                           samplePhrases: t.examples || t.samplePhrases || [],
                                         })));
                                       }
@@ -1319,7 +1327,7 @@ export default function AgentBuilderPage() {
                 variant="primary"
                 onClick={handleCreateGuardrail}
                 loading={savingGuardrail}
-                disabled={!guardrailFormName.trim()}
+                disabled={!guardrailFormName.trim() || !/^[0-9a-zA-Z-_]+$/.test(guardrailFormName.trim())}
               >
                 Create Guardrail
               </Button>
@@ -1328,11 +1336,15 @@ export default function AgentBuilderPage() {
         }
       >
         <SpaceBetween size="l">
-          <FormField label="Name" constraintText="Required">
+          <FormField
+            label="Name"
+            constraintText="Required. Letters, numbers, hyphens, and underscores only. No spaces."
+            errorText={guardrailFormName && !/^[0-9a-zA-Z-_]+$/.test(guardrailFormName.trim()) ? 'Invalid name format' : undefined}
+          >
             <Input
               value={guardrailFormName}
               onChange={({ detail }) => setGuardrailFormName(detail.value)}
-              placeholder="e.g., Content Safety Guardrail"
+              placeholder="e.g., ContentSafetyGuardrail"
               ariaLabel="Guardrail name"
             />
           </FormField>

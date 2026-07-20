@@ -604,6 +604,7 @@ def handle_create_sub_agent(arguments: dict, event: dict) -> dict:
         "lambdaTools": lambda_tools,
         "createdAt": now,
         "updatedAt": now,
+        "message": "Sub-agent created successfully",
     }
 
 
@@ -1716,9 +1717,33 @@ def handle_create_guardrail(arguments: dict, event: dict) -> dict:
                 if config.get("filtersConfig"):
                     create_kwargs["contentPolicyConfig"] = {"filtersConfig": config["filtersConfig"]}
 
-                # Topic policy
+                # Topic policy — remap frontend fields to Bedrock API format
                 if config.get("topicsConfig"):
-                    create_kwargs["topicPolicyConfig"] = {"topicsConfig": config["topicsConfig"]}
+                    bedrock_topics = []
+                    for topic in config["topicsConfig"]:
+                        # Skip topics with empty name or definition
+                        topic_name = topic.get("name", "").strip()
+                        topic_def = topic.get("definition", "").strip()
+                        if not topic_name or not topic_def:
+                            continue
+                        bedrock_topic = {
+                            "name": topic_name,
+                            "definition": topic_def,
+                            "type": "DENY",
+                        }
+                        # Frontend sends "samplePhrases", Bedrock API expects "examples"
+                        examples = topic.get("examples") or topic.get("samplePhrases", [])
+                        # Filter out empty strings from examples
+                        examples = [e.strip() for e in examples if e.strip()]
+                        if examples:
+                            bedrock_topic["examples"] = examples
+                        if topic.get("inputAction"):
+                            bedrock_topic["inputAction"] = topic["inputAction"]
+                        if topic.get("outputAction"):
+                            bedrock_topic["outputAction"] = topic["outputAction"]
+                        bedrock_topics.append(bedrock_topic)
+                    if bedrock_topics:
+                        create_kwargs["topicPolicyConfig"] = {"topicsConfig": bedrock_topics}
             elif isinstance(config, list):
                 # Legacy format: plain array of filter objects
                 create_kwargs["contentPolicyConfig"] = {"filtersConfig": config}
@@ -1872,31 +1897,44 @@ def handle_list_guardrail(arguments: dict, event: dict) -> list:
 
     items = response.get("Items", [])
 
-    def _parse_sdk_response(val):
+    def _parse_sdk_response(value):
         """Parse fullSDKResponse from DynamoDB string to dict for AWSJSON serialization."""
-        if not val:
+        if not value:
             return None
-        if isinstance(val, str):
+        if isinstance(value, str):
             try:
-                return json.loads(val)
+                return json.loads(value)
             except (json.JSONDecodeError, TypeError):
                 return None
-        return val
+        return value
 
-    return [
-        {
+    client = _get_bedrock_client()
+    result = []
+    for item in items:
+        guardrail_id = item.get("guardrailId")
+        full_sdk = _parse_sdk_response(item.get("fullSDKResponse"))
+        if guardrail_id:
+            try:
+                sdk_response = client.get_guardrail(
+                    guardrailIdentifier=guardrail_id,
+                    guardrailVersion="DRAFT",
+                )
+                sdk_response.pop("ResponseMetadata", None)
+                full_sdk = sdk_response
+            except Exception as e:
+                logger.warning(f"Could not fetch Bedrock guardrail {guardrail_id}: {e}")
+        result.append({
             "toolId": item.get("toolId"),
             "userId": item.get("userId"),
             "name": item.get("name"),
-            "guardrailId": item.get("guardrailId"),
+            "guardrailId": guardrail_id,
             "description": item.get("description"),
             "status": item.get("status"),
-            "fullSDKResponse": _parse_sdk_response(item.get("fullSDKResponse")),
+            "fullSDKResponse": full_sdk,
             "createdAt": item.get("createdAt"),
             "updatedAt": item.get("updatedAt"),
-        }
-        for item in items
-    ]
+        })
+    return result
 
 
 # ---------------------------------------------------------------------------
