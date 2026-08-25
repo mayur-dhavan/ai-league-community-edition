@@ -1,0 +1,159 @@
+{
+  "events": [
+    {
+      "type": "InputPrompt",
+      "message": "use strategy get_coins",
+      "position": {
+        "row": 5,
+        "col": 4
+      }
+    },
+    {
+      "type": "AnswerChallenge",
+      "message": "\n\n🔧 Using tool: Pathfinding\n\n[\"up\",\"left\",\"left\",\"left\",\"left\",\"right\",\"right\",\"right\",\"right\",\"right\",\"right\",\"right\",\"right\"]",
+      "position": {
+        "row": 5,
+        "col": 4
+      }
+    },
+    {
+      "type": "MoveSpace",
+      "position": {
+        "row": 5,
+        "col": 4
+      }
+    },
+    {
+      "type": "MoveSpace",
+      "position": {
+        "row": 4,
+        "col": 4
+      }
+    },
+    {
+      "type": "LoseNonPromptChallenge",
+      "challengeId": "c8",
+      "challengeName": "a Spike trap",
+      "damage": 1,
+      "points": 0,
+      "position": {
+        "row": 4,
+        "col": 3
+      }
+    },
+    {
+      "type": "MoveSpace",
+      "position": {
+        "row": 4,
+        "col": 2
+      }
+    },
+    {
+      "type": "MoveSpace",
+      "position": {
+        "row": 4,
+        "col": 1
+      }
+    },
+    {
+      "type": "WinNonPromptChallenge",
+      "challengeId": "c7",
+      "challengeName": "some Coins",
+      "damage": 0,
+      "points": 2500,
+      "position": {
+        "row": 4,
+        "col": 0
+      }
+    },
+    {
+      "type": "MoveSpace",
+      "position": {
+        "row": 4,
+        "col": 1
+      }
+    },
+    {
+      "type": "MoveSpace",
+      "position": {
+        "row": 4,
+        "col": 2
+      }
+    },
+    {
+      "type": "MoveSpace",
+      "position": {
+        "row": 4,
+        "col": 3
+      }
+    },
+    {
+      "type": "MoveSpace",
+      "position": {
+        "row": 4,
+        "col": 4
+      }
+    },
+    {
+      "type": "MoveSpace",
+      "position": {
+        "row": 4,
+        "col": 5
+      }
+    },
+    {
+      "type": "MoveSpace",
+      "position": {
+        "row": 4,
+        "col": 6
+      }
+    },
+    {
+      "type": "MoveSpace",
+      "position": {
+        "row": 4,
+        "col": 7
+      }
+    },
+    {
+      "type": "WinGame",
+      "points": 3000,
+      "timeElapsed": 24,
+      "position": {
+        "row": 4,
+        "col": 8
+      }
+    },
+    {
+      "type": "ScoreSummary",
+      "position": {
+        "row": 4,
+        "col": 8
+      },
+      "timeElapsed": 24,
+      "livesRemaining": 4,
+      "lifeBonus": 1000,
+      "coinsEarned": 2500,
+      "tokensUsed": 817,
+      "challengesAttempted": 1,
+      "avgTokensPerChallenge": 817,
+      "tokenBonus": 183,
+      "treasureBonus": 3000,
+      "totalScore": 6683,
+      "customModelCount": 0,
+      "customModelBonus": 0
+    }
+  ],
+  "summary": {
+    "timeRemaining": "4:47",
+    "livesRemaining": 4,
+    "lifeBonus": 1000,
+    "coinsEarned": 2500,
+    "treasureBonus": 3000,
+    "totalScore": 6683,
+    "tokensUsed": 817,
+    "challengesAttempted": 1,
+    "avgTokensPerChallenge": 817,
+    "tokenBonus": 183
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "events": [
+    {
+      "type": "InputPrompt",
+      "message": "use strategy max_points",
+      "position": {
+        "row": 5,
+        "col": 4
+      }
+    },
+    {
+      "type": "LoseGame",
+      "timeElapsed": 954,
+      "position": {
+        "row": 5,
+        "col": 4
+      }
+    },
+    {
+      "type": "ScoreSummary",
+      "position": {
+        "row": 5,
+        "col": 4
+      },
+      "timeElapsed": 954,
+      "livesRemaining": 5,
+      "lifeBonus": 1250,
+      "coinsEarned": 0,
+      "tokensUsed": 0,
+      "challengesAttempted": 1,
+      "avgTokensPerChallenge": 0,
+      "tokenBonus": 1000,
+      "treasureBonus": 0,
+      "totalScore": 2250,
+      "customModelCount": 0,
+      "customModelBonus": 0
+    }
+  ],
+  "summary": {
+    "timeRemaining": "0:00",
+    "livesRemaining": 5,
+    "lifeBonus": 1250,
+    "coinsEarned": 0,
+    "treasureBonus": 0,
+    "totalScore": 2250,
+    "tokensUsed": 0,
+    "challengesAttempted": 1,
+    "avgTokensPerChallenge": 0,
+    "tokenBonus": 1000
+  }
+}

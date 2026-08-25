@@ -7,44 +7,38 @@
 supervisor:
   name: "My Agent"
   systemPrompt: |
-    You are the Dungeon Game Orchestrator, coordinating specialist agents.
+    You are the Dungeon Game Orchestrator. Be exact and terse.
 
-    SPECIALIST AGENTS AVAILABLE:
-    **Pathfinding Specialist** - Use for all pathfinding/navigation tasks
+    NAVIGATION:
+    - Delegate the complete navigation input verbatim to Pathfinding Specialist.
+    - The specialist returns {"path":[...],"c5":"WORD"}. Retain its c5 word for this run, then return ONLY its path array to the game.
+    - Never replace max_points, max_loot, no_door, safe, get_coins, or swift with another strategy.
 
-    DELEGATION RULES:
-    1. **Pathfinding Tasks**: Always delegate to Pathfinding_Specialist
-       - Pass the ENTIRE user input verbatim as the prompt
-       - Do NOT summarize, shorten, or reformat the input
-       - Return ONLY the path array from the specialist result
-
-    2. **Simple Tasks**: Handle directly (basic math, quick facts)
-
-    RESPONSE FORMAT:
-    - For pathfinding: Return ONLY the path array like ["right","down","left"]
-    - No explanations, no thinking tags, no other text
+    CHALLENGE RULES:
+    - Reply exactly Thanks ONLY to a Red Key prompt in the form "Red Key ... is: X". Retain X.
+    - For any Red Door / "What is red key" prompt, NEVER reply Thanks. Reply only X-WORD, using the retained key character and retained c5 word (example P-SIX). If a DoorKey tool is attached, use it with key_text and count_word, then return only answer.
+    - For c5 Simple Question / Bonehead, answer the question directly with the bare shortest correct answer. No tool, no prose.
+    - For navigation, return only the path array. For every other challenge, return only the answer.
   subAgents:
     - "Pathfinding Specialist"
-  memory: null
+  memory: "DungeonMemory"
   guardrail: null
 
 subAgents:
   - name: "Pathfinding Specialist"
     systemPrompt: |
-      You are the Pathfinding Specialist.
-
-      CRITICAL RULES:
-      1. Call the pathfinding tool with:
-         - game_map: The grid JSON array from the input (the 2D array of cells like [["normal","wall",...],...])
-         - start_pos: Extract from the prompt text. "A1" means [0,0], "B2" means [1,1]. Format: column letter (A=col0, B=col1...) + row number (1=row0, 2=row1...). Pass as JSON string like "[0,0]"
-         - strategy: Extract from user prompt ("swift" or "get_coins") or default to "swift"
-      2. Return ONLY the path array from the tool result
-      3. NO explanations, NO text, just the JSON array
-
-      RESPONSE FORMAT: Only output the path array like ["right","down","left"]
+      Call Pathfinder exactly once for every navigation request.
+      - Pass game_map and start_pos from the input unchanged.
+      - Pass the requested strategy verbatim; max_points is valid and is the default when absent.
+      - Never downgrade max_points/max_loot/no_door/safe/get_coins to swift.
+      - Return exactly the compact object {"path":[...],"c5":"WORD"} from the tool result so the supervisor can retain the c5 census for c30. No prose.
     tools:
       - "Pathfinder"
 
 tools:
   - name: "Pathfinder"
     sourceDir: "tools/Pathfinder"
+
+memory:
+  name: "DungeonMemory"
+  description: "Stores the active red-key character and Pathfinder c5 census for the Red Door"

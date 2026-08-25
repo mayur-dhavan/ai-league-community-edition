@@ -1,0 +1,59 @@
+{
+  "events": [
+    {
+      "type": "InputPrompt",
+      "message": "",
+      "position": {
+        "row": 5,
+        "col": 4
+      }
+    },
+    {
+      "type": "AnswerChallenge",
+      "message": "\n\n🔧 Using tool: Pathfinding\n\nup,left,left,left,left,up,down,down,up,right,right,right,right,up,right,right,right,right,left,down,down,right,left,down,down,down,left,right,right,up,left,up,up,up,up,up,up,up,left,right,right,down,left,down,down,down,left,left,left,left,left,left,up,up,up,up,left,right,right,down,left,down,down,down,down,down,down,down,left,right,right,up,left,up,up,up,right,right,right,down,down,down,down,up,up,up,up,up,up,up,down,down,down,right,right,right,right",
+      "position": {
+        "row": 5,
+        "col": 4
+      }
+    },
+    {
+      "type": "LoseGame",
+      "timeElapsed": 47,
+      "position": {
+        "row": 5,
+        "col": 4
+      }
+    },
+    {
+      "type": "ScoreSummary",
+      "position": {
+        "row": 5,
+        "col": 4
+      },
+      "timeElapsed": 47,
+      "livesRemaining": 5,
+      "lifeBonus": 1250,
+      "coinsEarned": 0,
+      "tokensUsed": 1292,
+      "challengesAttempted": 1,
+      "avgTokensPerChallenge": 1292,
+      "tokenBonus": 0,
+      "treasureBonus": 0,
+      "totalScore": 1250,
+      "customModelCount": 0,
+      "customModelBonus": 0
+    }
+  ],
+  "summary": {
+    "timeRemaining": "4:43",
+    "livesRemaining": 5,
+    "lifeBonus": 1250,
+    "coinsEarned": 0,
+    "treasureBonus": 0,
+    "totalScore": 1250,
+    "tokensUsed": 1292,
+    "challengesAttempted": 1,
+    "avgTokensPerChallenge": 1292,
+    "tokenBonus": 0
+  }
+}
