@@ -104,7 +104,26 @@ def _parse_body(event: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def lambda_handler(event, context):
-    """Accepts {capacity_mw, kind} or {text|question|description}."""
+    """Return the exact c18 energy-impact answer.
+
+    The AI League UI generates this tool's name and parameter list from the block
+    below. Keep it intact.
+
+    ---
+    Tool: c18
+    Description: Solve c18 renewable energy impact. Send capacity_mw and kind (solar, onshore_wind or offshore_wind). Output the returned answer verbatim.
+    Parameters:
+        capacity_mw  (required) - project capacity in MW as a number
+        kind         (required) - solar, onshore_wind or offshore_wind
+    ---
+
+    ## Notes
+        - A free-text {text} description is also accepted for direct diagnostics.
+        - offshore and onshore are detected before the generic word wind.
+
+    ## Returns
+        answer
+    """
     try:
         body = _parse_body(event)
         text = str(

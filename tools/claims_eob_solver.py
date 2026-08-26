@@ -14,18 +14,67 @@ which is what this module computes.
 Output is minified JSON with two-decimal money values:
     {"TotalAllowed":120.00,"MemberResponsibility":49.00,"DeniedLines":[]}
 
-Token note: pass `rows` (compact arrays) rather than the raw EOB where you can.
-Raw FHIR JSON costs roughly 1000 output tokens per challenge; compact rows
-cost about 80, and the token bonus is an average over challenges visited.
+Token note: pass pipe-delimited `rows` rather than raw FHIR. The six-field
+format avoids both raw-data duplication and nested JSON-string retries:
+    code|submitted|eligible|benefit|denied0or1|carc;...
 """
 
 import json
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-# Compact row layout
+# Backward-compatible JSON row layout.
 ROW_FIELDS = (
     "code", "submitted", "eligible", "copay", "deductible", "benefit", "denied", "carc",
 )
+
+# Model-facing format: six pipe-delimited fields, semicolon-delimited rows.
+# Copay and deductible are omitted because the documented formula reduces to
+# eligible - benefit for non-denied lines.
+LEAN_ROW_FIELDS = ("code", "submitted", "eligible", "benefit", "denied", "carc")
+
+
+def _as_denied(value: Any) -> bool:
+    """Parse compact denied flags without treating the string "0" as true."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    token = str(value).strip().lower()
+    if token in {"1", "true", "yes", "denied"}:
+        return True
+    if token in {"", "0", "false", "no", "approved"}:
+        return False
+    raise ValueError(f"invalid denied flag: {value!r}; use 0 or 1")
+
+
+def _parse_lean_rows(text: str) -> List[Dict[str, Any]]:
+    """Parse `code|submitted|eligible|benefit|denied0or1|carc;...`."""
+    rows: List[Dict[str, Any]] = []
+    for index, raw_row in enumerate(str(text).split(";"), 1):
+        if not raw_row.strip():
+            continue
+        fields = [field.strip() for field in raw_row.split("|")]
+        if len(fields) != len(LEAN_ROW_FIELDS):
+            raise ValueError(
+                f"row {index} must have {len(LEAN_ROW_FIELDS)} pipe-delimited fields"
+            )
+        code, submitted, eligible, benefit, denied, carc = fields
+        rows.append({
+            "code": code,
+            "submitted": float(submitted or 0.0),
+            "eligible": float(eligible or 0.0),
+            "copay": 0.0,
+            "deductible": 0.0,
+            "benefit": float(benefit or 0.0),
+            "denied": _as_denied(denied),
+            "carc": carc,
+        })
+    if not rows:
+        raise ValueError("rows must contain at least one claim line")
+    return rows
+
 
 CARC_DESCRIPTIONS = {
     "4": "Procedure inconsistent with modifier",
@@ -81,7 +130,10 @@ def _denial(item: Dict[str, Any]) -> Tuple[bool, str]:
 def normalize_rows(payload: Any) -> List[Dict[str, Any]]:
     """Accept compact rows, a FHIR item[] array, or a full EOB resource."""
     if isinstance(payload, str):
-        payload = json.loads(payload)
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            payload = _parse_lean_rows(payload)
 
     if isinstance(payload, dict):
         payload = payload.get("item") or payload.get("items") or payload.get("rows") or []
@@ -97,7 +149,7 @@ def normalize_rows(payload: Any) -> List[Dict[str, Any]]:
                 "copay": float(row.get("copay") or 0.0),
                 "deductible": float(row.get("deductible") or 0.0),
                 "benefit": float(row.get("benefit") or 0.0),
-                "denied": bool(row.get("denied")),
+                "denied": _as_denied(row.get("denied")),
                 "carc": str(row.get("carc") or ""),
             })
             continue
@@ -124,7 +176,7 @@ def normalize_rows(payload: Any) -> List[Dict[str, Any]]:
                 "copay": float(entry.get("copay") or 0.0),
                 "deductible": float(entry.get("deductible") or 0.0),
                 "benefit": float(entry.get("benefit") or 0.0),
-                "denied": bool(entry.get("denied")),
+                "denied": _as_denied(entry.get("denied")),
                 "carc": str(entry.get("carc") or ""),
             })
 
@@ -195,7 +247,15 @@ def _parse_body(event: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def lambda_handler(event, context):
-    """Accepts {"rows":[[...]]}, {"item":[...]}, or a full EOB resource."""
+    """Solve c3 from compact pipe-delimited rows.
+
+    ---
+    Tool: c3
+    Description: Solve c3 EOB rows; return answer unchanged.
+    Parameters:
+        rows         (required) - semicolon rows code|submitted|eligible|benefit|denied0or1|carc
+    ---
+    """
     try:
         body = _parse_body(event)
         payload = (

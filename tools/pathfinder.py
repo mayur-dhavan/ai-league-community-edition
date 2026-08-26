@@ -40,7 +40,7 @@ Package = Tuple[Coord, Coord]
 # Bump on every edit. Combat logs do not expose which Lambda/alias ran or its
 # raw response, so this marker is printed to CloudWatch and returned only for
 # explicit verbose/direct verification. Keep the scored response path-only lean.
-TOOL_VERSION = "2026-08-25.7-json-array-relay"
+TOOL_VERSION = "2026-08-26.1-optimised-tour"
 
 
 def _remove_target_unit(
@@ -355,7 +355,14 @@ def _resolve_start(
     if start_tiles:
         return start_tiles[0]
 
+    # `start_label` comes first on purpose. It is the position copied verbatim
+    # from the prompt, e.g. "E6", so the model does no arithmetic. The 10-42 run
+    # converted E6 into [4,4] instead of [5,4]: right column, wrong row. That
+    # returned a legal-looking 96-move route whose first step walked into the wall
+    # at (5,3). A verbatim label cannot be off by one.
     for candidate in (
+        body.get("start_label"),
+        body.get("startLabel"),
         map_object.get("playerStart"),
         body.get("playerStart"),
         body.get("start_pos"),
@@ -521,8 +528,12 @@ def _walk_distance(
 def _nearest_order(
     grid: Sequence[Sequence[str]], start: Coord, targets: List[Coord]
 ) -> List[Coord]:
-    """Greedy nearest-neighbour ordering. Distance only affects elapsed time,
-    so a greedy tour is sufficient; an exact tour buys no extra score."""
+    """Greedy nearest-neighbour ordering, kept for the coin-only strategies.
+
+    Movement itself is not scored, but every emitted direction is an output
+    token and the token bonus is base - (tokens / challengesVisited). Use
+    `_tour_order` for anything that lands in the scored navigation answer.
+    """
     remaining = list(targets)
     ordered: List[Coord] = []
     current = start
@@ -537,6 +548,129 @@ def _nearest_order(
         remaining.remove(chosen)
         current = chosen
     return ordered
+
+
+def _open_region(grid: Sequence[Sequence[str]], start: Coord) -> Set[Coord]:
+    """Cells reachable from `start` without crossing a locked door.
+
+    Tiles sealed behind a door must not distort the tour: `_assemble` defers
+    them until the matching key is collected, so ordering them as if they were
+    freely reachable produces a tour whose measured length is a lie.
+    """
+    rows, cols = len(grid), len(grid[0])
+    seen = {start}
+    queue = deque([start])
+    while queue:
+        r, c = queue.popleft()
+        for dr, dc, _name in DIRECTIONS:
+            nxt = (r + dr, c + dc)
+            if nxt in seen or not (0 <= nxt[0] < rows and 0 <= nxt[1] < cols):
+                continue
+            cell = grid[nxt[0]][nxt[1]]
+            if cell == WALL or cell in DOOR_TILES:
+                continue
+            seen.add(nxt)
+            queue.append(nxt)
+    return seen
+
+
+def _tour_order(
+    grid: Sequence[Sequence[str]],
+    start: Coord,
+    targets: Sequence[Coord],
+    risk: Optional[Dict[Coord, float]] = None,
+    finish: Optional[Coord] = None,
+) -> List[Coord]:
+    """Distance-minimising visit order: multi-start nearest neighbour + 2-opt.
+
+    Replaces the previous confidence-tier bucketing. Tiering visited every tile
+    of one confidence band before moving to the next, which on the live board
+    walked all four c5 tiles first even though two sit in the far-left column
+    and two in the far-right, producing a 97-move tour where 79 suffices. The
+    18 wasted moves are 126 characters of output, roughly 35 tokens.
+
+    Confidence is retained only as a tie-break: among tours of equal length the
+    one that visits fragile tiles later wins, preserving the original intent of
+    banking safe points before risking a life. The key/door package is appended
+    by the caller after this ordering, so the riskiest tile stays last either way.
+
+    `finish` charges the closing leg from the last target to wherever the route
+    continues, which is the key when a door package follows and the treasure
+    otherwise. Without it the tour optimises to a dead end: it ended in the
+    top-left corner and then paid 20 moves to walk back to a key in the bottom row.
+    """
+    if len(targets) <= 1:
+        return list(targets)
+
+    weights = dict(risk or {})
+    nodes = [start] + list(targets)
+    if finish is not None and finish not in nodes:
+        nodes.append(finish)
+    dist: Dict[Coord, Dict[Coord, int]] = {}
+    for a in nodes:
+        row: Dict[Coord, int] = {}
+        for b in nodes:
+            if a == b:
+                row[b] = 0
+            else:
+                walked = _walk_distance(grid, a, b)
+                row[b] = walked if walked is not None else 10**6
+        dist[a] = row
+
+    def length(order: Sequence[Coord]) -> int:
+        total = 0
+        current = start
+        for node in order:
+            total += dist[current][node]
+            current = node
+        if finish is not None:
+            total += dist[current][finish]
+        return total
+
+    def lateness(order: Sequence[Coord]) -> float:
+        # Lower is better, so a fragile tile placed early costs more.
+        span = len(order)
+        return sum(weights.get(pos, 0.0) * (span - index)
+                   for index, pos in enumerate(order))
+
+    def cost(order: Sequence[Coord]) -> Tuple[int, float]:
+        return (length(order), lateness(order))
+
+    best: Optional[List[Coord]] = None
+    best_cost: Optional[Tuple[int, float]] = None
+
+    for seed in targets:
+        remaining = set(targets)
+        order = [seed]
+        remaining.discard(seed)
+        current = seed
+        while remaining:
+            nxt = min(
+                remaining,
+                key=lambda t: (dist[current][t], weights.get(t, 0.0), t),
+            )
+            order.append(nxt)
+            remaining.discard(nxt)
+            current = nxt
+
+        improved = True
+        while improved:
+            improved = False
+            current_cost = cost(order)
+            for i in range(len(order) - 1):
+                for j in range(i + 2, len(order) + 1):
+                    candidate = order[:i] + order[i:j][::-1] + order[j:]
+                    candidate_cost = cost(candidate)
+                    if candidate_cost < current_cost:
+                        order = candidate
+                        current_cost = candidate_cost
+                        improved = True
+
+        final_cost = cost(order)
+        if best_cost is None or final_cost < best_cost:
+            best, best_cost = list(order), final_cost
+
+    return best or list(targets)
 
 
 # ---------------------------------------------------------------------------
@@ -793,16 +927,38 @@ def _select_targets(
         )
         scored = scored[:max_challenges]
 
-    ordered = _nearest_order(grid, start, coins)
-    cursor = ordered[-1] if ordered else start
-    tiers: Dict[float, List[Coord]] = {}
-    for prob, _value, pos in scored:
-        tiers.setdefault(round(prob, 2), []).append(pos)
-    for prob in sorted(tiers, reverse=True):
-        tier = _nearest_order(grid, cursor, tiers[prob])
-        ordered += tier
-        if tier:
-            cursor = tier[-1]
+    # Coins and challenges share one distance-optimised tour. Confidence is a
+    # tie-break inside _tour_order rather than a hard bucketing, because tiering
+    # forced a full traverse of the board per confidence band. Tiles sealed
+    # behind a locked door are held back: _assemble retries them once the
+    # matching key is collected, so including them here would both distort the
+    # tour and reorder the door package.
+    open_region = _open_region(grid, start)
+    risk = {pos: 1.0 - prob for prob, _value, pos in scored}
+    candidates = list(coins) + [pos for _prob, _value, pos in scored]
+    reachable_now = [pos for pos in candidates if pos in open_region]
+    sealed = [pos for pos in candidates if pos not in open_region]
+
+    # After the tour the route continues into the key/door package when one is
+    # viable, otherwise straight to treasure. Charging that closing leg stops the
+    # tour from finishing in a far corner and paying for the walk back.
+    door_cells = {grid[pos[0]][pos[1]] for pos in doors}
+    viable_keys = [
+        key for key in keys
+        if strategy != "no_door"
+        and KEY_TO_DOOR[grid[key[0]][key[1]]] in door_cells
+        and float(confidence.get(KEY_TO_DOOR[grid[key[0]][key[1]]], 0.0)) >= door_threshold
+    ]
+    finish = min(
+        viable_keys, key=lambda k: _walk_distance(grid, start, k) or 10**6
+    ) if viable_keys else treasure
+
+    ordered = _tour_order(grid, start, reachable_now, risk, finish)
+    if sealed:
+        notes.append(
+            f"{len(sealed)} tile(s) sealed behind a door, ordered after the key"
+        )
+        ordered += sealed
 
     if strategy == "no_door":
         notes.append("no_door: doors excluded by strategy")
@@ -1176,20 +1332,29 @@ def plan(body: Dict[str, Any]) -> Dict[str, Any]:
     coords = [[r, c] for r, c in path]
     output_format = str(body.get("output_format") or "directions").lower()
 
-    # KEEP THIS RESPONSE TINY.
-    # The supervisor echoes the tool result as its own answer, so every field
-    # here becomes an OUTPUT token and lands in the token-bonus denominator.
-    # A verbose response measured 1406 tokens on a real run and zeroed a 1000
-    # point bonus. Diagnostics go to CloudWatch instead, or to the caller only
-    # when verbose is explicitly requested.
+    # `answer` is the exact string the Supervisor must emit, so the model copies
+    # one field instead of rebuilding an array. A tool result is an input message
+    # and is free; only what the model emits counts against the token bonus.
+    #
+    # IT MUST BE A MINIFIED JSON ARRAY. This is not a style preference:
+    #   - The 10-01 run emitted `["up",...] FOUR` and scored 18,998.
+    #   - The 10-42 run emitted `up,left,... FOUR` and the live engine produced
+    #     ZERO MoveSpace events. The avatar never left the start tile, the run
+    #     timed out at 173 seconds with 0 coins, and the score was 1,750.
+    # The live parser therefore requires a JSON array and does NOT fall back to
+    # scraping direction words out of free text, whatever the local port does.
+    # Never "optimise" this into bare comma-separated words again.
+    #
+    # The trailing census word is safe: the engine finds the array first and
+    # ignores what follows it, which the 10-01 run proved on a scored board.
+    census_word = number_to_words(counts.get(count_tile, 0))
+    wants_coords = output_format.startswith("coord")
+    emit = coords if wants_coords else directions
     result: Dict[str, Any] = {
-        # Directions are the format the stock game tool emits, so they are the
-        # safest default. Switch with output_format="coords" if a run shows the
-        # engine prefers absolute positions. Keep path first: the specialist
-        # extracts this field as a valid JSON array for the Supervisor to echo.
-        "path": coords if output_format.startswith("coord") else directions,
+        "answer": json.dumps(emit, separators=(",", ":")) + " " + census_word,
+        "path": emit,
         "start_position": [start[0], start[1]],
-        count_tile: number_to_words(counts.get(count_tile, 0)),
+        count_tile: census_word,
     }
 
     diagnostics: Dict[str, Any] = {
@@ -1293,10 +1458,10 @@ def lambda_handler(event, context):
 
     ---
     Tool: route
-    Description: Route calculator. Finds the score-optimal path from start to treasure and returns the c5 tile count.
+    Description: Route calculator. Finds the score-optimal path to the treasure and returns the exact string to emit in the answer field. Output that answer field verbatim and nothing else.
     Parameters:
         game_map     (required) - the 2D grid array as JSON string or list
-        start_pos    (optional) - starting position as [row, col], defaults to the "start" cell
+        start_label  (required) - the start position copied exactly from the input, e.g. E6
         strategy     (required) - routing mode: max_points, max_loot, no_door, safe, get_coins, swift
     ---
 
@@ -1320,7 +1485,9 @@ def lambda_handler(event, context):
         swift      - shortest path to treasure
 
     ## Returns
-        path, start_position, c5
+        answer, path, start_position, c5
+        Emit `answer` verbatim. It is the route already joined with the c5 census
+        word appended, which is what the game and the later Red Door both need.
     """
     try:
         body = _parse_body(event)

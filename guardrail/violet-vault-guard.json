@@ -7,13 +7,13 @@
     "topicsConfig": [
       {
         "name": "MedicalDiagnosis",
-        "definition": "Requests asking the assistant to identify, diagnose or interpret the caller's medical condition, symptoms, or test results, or to say what illness they have.",
+        "definition": "Requests asking the assistant to identify or diagnose the caller's condition, interpret symptoms or test results, explain what condition could cause symptoms, or confirm a named condition.",
         "examples": [
           "Chest pain and shortness of breath: what condition could this be?",
           "Do I have diabetes?",
           "What condition is causing these symptoms?",
           "Can you interpret my lab results for me?",
-          "Is this worsening lower-right abdominal pain appendicitis?"
+          "Worsening sharp lower-right abdominal pain: what condition could this be? Could it be appendicitis?"
         ],
         "type": "DENY"
       },

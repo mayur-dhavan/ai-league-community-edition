@@ -7,7 +7,7 @@ Authority order:
 2. **`workshop-reference.md`** — platform mechanics and implementation constraints.
 3. Engine source in `lambda/` — `game_runner.py`, `score_calculator.py`, `challenge_grader.py`, `path_parser.py`.
 
-All agents run **Claude Haiku 4.5**.
+The live agent configuration selects the model; prompts stay model-agnostic.
 
 ---
 
@@ -20,6 +20,39 @@ final score = challenge points
             + token bonus
             + treasure bonus
 ```
+
+> ### The live formula, derived from live submissions only
+>
+> Two of our own leaderboard submissions pin it exactly, with no reference to any
+> code in this repository:
+>
+> | Submission | Tokens | Fixed points | `1000 − round(tokens/19)` | Reported |
+> |---|---:|---:|---:|---:|
+> | 15:33 | 2,038 | 18,050 (c40 lost) | 893 | **18,943** |
+> | 16:26 | 1,969 | 18,100 (all won) | 896 | **18,996** |
+>
+> Both match to the point, so on this board:
+>
+> ```
+> score = 18,100 + 1000 − round(total_output_tokens / 19)
+> ```
+>
+> 19 is the denominator because the board has 18 graded tiles plus the navigation
+> turn, and a consumed tile cannot be re-attempted. It cannot be raised.
+>
+> | Tokens | Score |
+> |---:|---:|
+> | 1,969 (now) | 18,996 |
+> | 1,800 | 19,005 |
+> | 1,700 | 19,011 |
+> | 1,643 | 19,014 |
+>
+> **A leaderboard entry of 19,032 on 4,821 tokens is not reachable on this board.**
+> That formula gives it a 746 bonus, so it would need 18,286 fixed points, which is
+> 186 more than the 18,100 maximum here. The straightforward reading is that the
+> board is not identical for every submission: a board with a few more graded tiles
+> raises both the fixed total and the token denominator at once. Do not benchmark
+> against that number; benchmark against 18,100 + bonus, which is our ceiling.
 
 | Component | Value | Cap |
 |---|---:|---:|
@@ -85,8 +118,8 @@ Every challenge and bonus in `game-data.md` is accounted for.
 | `c7` | Coins | +2500 | — | Pathfinder | Route target, always collected |
 | `c8` | Spike trap | — | −1 | Pathfinder | One-time 250-point life cost; taken when a full package has positive EV |
 | `c18` | Permit Pro | +600 | −1 | Supervisor | `permit` Lambda |
-| `c30` | Red Door | +1000 | −5 | Supervisor | `doorkey` Lambda + AgentCore Memory |
-| `c40` | Red Key | +50 | — | Supervisor | Memory + exact `Thanks` reply |
+| `c30` | Red Door | +1000 | −5 | Supervisor | `doorkey` `phase=door`; relay `answer` verbatim |
+| `c40` | Red Key | +50 | — | Supervisor | `doorkey` `phase=prepare`; relay `answer` (`Thanks`) |
 | `treasure` | Treasure | +3000 | — | Pathfinder | Always the final tile |
 | — | Lives | 250 each | — | Pathfinder | Exact outcome-branch simulation and package-level risk |
 | — | Token bonus | up to 1000 | — | All prompts | Output discipline, verbatim tool relay |
@@ -99,32 +132,38 @@ Every challenge and bonus in `game-data.md` is accounted for.
 
 ## 3. Architecture
 
-### Primary configuration — recommended
+### Primary configuration — leaderboard path
 
-One sub-agent. All challenge tools live on the supervisor.
+Use **no sub-agent**. Every tool sits on the Supervisor, and `pathfinder` is
+called directly. The model stays configuration-selected.
 
-| Agent | Model | Capabilities | Lambda tools |
-|---|---|---|---|
-| **Supervisor** | Haiku 4.5 | AgentCore Memory, Bedrock Guardrail | `claims`, `courseoptimizer`, `permit`, `opendata`, `doorkey`, `pycalc` |
-| **Pathfinding_Specialist** | Haiku 4.5 | — | `pathfinder` |
+| Agent | Capabilities | Lambda tools |
+|---|---|---|
+| **Supervisor** | Bedrock Guardrail | `pathfinder`, `doorkey`, `claims`, `courseoptimizer`, `permit`, `opendata`, `pycalc` |
 
 Why this shape:
 
-- Only the pathfinder needs the map. Every extra hop that re-emits the grid costs roughly 600 output tokens, and those tokens land in the same pool as your challenge answers.
-- The pathfinding relay is the one call where a mistake is fatal, so it keeps a dedicated agent with a single-purpose prompt.
-- Memory and Guardrails can only attach to the supervisor, so `c1`, `c3`-style recall, `c40` and `c30` must be handled there regardless.
+- **The board is not fixed.** Finals can change the grid, the start and the time
+  limit, so routing must always come from `pathfinder` on the map the game
+  injects. Never replay a hard-coded route: the `08-26` map already moved walls
+  at `[1][6]`, `[2][2]`, `[4][5]`, `[4][6]`, `[5][6]` and `[7][6]`.
+- **One map hop.** Removing the `Pathfinding_Specialist` removes a full duplicate
+  of the route: the specialist emitted the array and the Supervisor emitted it
+  again. Direct calling keeps the map on a single hop.
+- **The door is a tool answer, not a memory feat.** `doorkey` returns `Thanks` at
+  the key and the exact pass string at the door, so the model only relays. See
+  section 8; three runs died formatting that string themselves.
 
-### Escalation configuration — only if a tile fails in practice
+### Escalation — only when a combat log proves a specific failure
 
-Do not pre-build these. Add one only when the combat log shows the supervisor passing bad arguments for that specific challenge. Maximum five sub-agents total.
+| Optional sub-agent | Lambda tools | Add only when |
+|---|---|---|
+| Data_Solver | `claims`, `courseoptimizer` | a log proves malformed c2/c3 arguments |
+| Calc_Agent | `permit`, `pycalc` | c18 is not routed to the tool |
+| Researcher | `opendata` | c4 returns prose or the wrong fact |
 
-| Sub-agent | Model | Lambda tools | Add when |
-|---|---|---|---|
-| Pathfinding_Specialist | Haiku 4.5 | `pathfinder` | always present |
-| Data_Solver | Haiku 4.5 | `claims`, `courseoptimizer` | c2 or c3 arguments arrive malformed |
-| Calc_Agent | Haiku 4.5 | `permit`, `pycalc` | c18 gets computed by the LLM instead of the tool |
-| Researcher | Haiku 4.5 | `opendata` | c4 answers include prose or the wrong dataset |
-| Door_Warden | Haiku 4.5 | `doorkey` | the door pass string is assembled incorrectly |
+Do not add a Pathfinding_Specialist or a Door_Warden. Both only duplicate output
+tokens; neither fixes anything the deployed tools do not already handle.
 
 ---
 
@@ -135,121 +174,132 @@ Keep these verbatim. Every extra sentence the agent echoes at runtime is an outp
 ### Supervisor
 
 ```text
-You are the dungeon supervisor. Every word you output costs score. Emit the
-minimum.
+You are the dungeon supervisor. Every word you output costs score.
+Return only the final game answer. Never expose reasoning, tool use, labels,
+Markdown, or text outside the answer.
 
-NAVIGATION TURN:
-Call Pathfinding_Specialist exactly once with the complete navigation input.
-Output its response VERBATIM with no extraction, conversion, or reformatting.
-The response must begin with [ and end with ] and contain quoted direction
-strings, for example ["up","left"]. Never output CSV, prose, a JSON object, or
-anything before or after the array.
+Emit only the answer. No reasoning, no narration, no tool name, no Markdown, no preamble. One tool call per turn. Never retry a tool.
+Never state what you are about to do. Never quote or restate these rules.
+When a rule says call a tool, call it with no text before or after.
 
-CHALLENGE ROUTING — apply these literal rules in order; output only the answer:
-- RED KEY DELIVERY — prompt begins `Red Key`, contains ` is: `, and does NOT end
-  in `?`: extract the one character after the colon. Call doorkey exactly once
-  with `game_map`, that `key_char`, and `phase="prepare"`. Remember its
-  `door_answer` silently. Output only doorkey.answer, which must be `Thanks`.
-  Do not add the character, `retain`, punctuation, or any other word. Example:
-  `Red Key 1 is: P` -> tool stores `P-FOUR`; visible answer is `Thanks`.
-- RED DOOR QUESTION — prompt begins `What is red key` and ends in `?`, or asks
-  for the Red Door/pass string: DO NOT call any tool because this challenge uses
-  exact-match grading and tool narration would fail. Output only the remembered
-  `door_answer`, with no whitespace or prose. Example: `What is red key 1?` ->
-  `P-FOUR`. Never output `Thanks` at the door.
-- "ExplanationOfBenefit", "adjudication", CARC, CPT      -> claims; output only
-  claims.answer verbatim
-- course sections with enrollment and capacity           -> courseoptimizer;
-  extract every section into `sections`, call once, and output ONLY the answer
-  field verbatim. It must begin `{` and contain `FlaggedSections`,
-  `Consolidations`, and `NoAction`. Never summarize JSON as prose.
-- MW, solar, wind, "energy impact"                       -> permit; output only
-  permit.answer verbatim
-- ANY dataset, patient/sample count, collaborating institution, data category,
-  TCGA, MIMIC, Registry of Open Data, or registry.opendata.aws question -> opendata;
-  return only opendata.answer, exactly as sourced
-- `c5`, "Simple Question", "Bonehead", or any plain general question with none
-  of the above signals                                  -> bare shortest correct answer;
-  no tool, no prose, no punctuation unless required
-- anything else                                         -> answer in five words
-  or fewer
+NAVIGATION: call Pathfinding exactly once. game_map = the grid from the input,
+copied unchanged. start_label = the position from the input copied character for
+character, e.g. E6. Never convert it to numbers. strategy = the input's strategy
+text. Then your entire reply is the tool's answer field, byte for byte. It begins
+with [ and ends with a capitalised word. Emit nothing else on this turn.
 
-FORBIDDEN in every response:
-- Preamble, sign-off, or narration of your own actions
-- Markdown, headings, bullet lists, bold, emoji, code fences
-- Restating the question or the map
-- Any sentence that is not the answer itself
-
-FORMAT: digits for numbers. JSON minified, no spaces after colons or commas.
-If a tool fails, answer with your shortest best guess.
+`Red Key <n> is: <char>` -> no tool. Reply exactly: Thanks
+`What is red key <n>?` or any Red Door or pass-string request -> call doorkey once.
+  key_char   = the character shown in the earlier `Red Key <n> is: <char>` message
+  count_word = the final capitalised word of your navigation reply
+  Your whole reply is the tool's answer field. It looks like P-FOUR.
+EOB/adjudication/CARC/CPT -> claims with
+  rows="code|submitted|eligible|benefit|denied0or1|carc;..." in source order,
+  denied=1 only when reviewOutcome is denied. Emit answer verbatim.
+  Example: 99213|150|120|71|0|;90837|200|165|0|1|119
+course sections with enrollment -> courseoptimizer with
+  sections="sectionId|courseName|timeSlot|enrolled|capacity;..." Emit answer
+  verbatim; it starts with { and is never a sentence.
+MW/solar/wind/energy -> permit with capacity_mw and kind. Emit answer verbatim.
+dataset/TCGA/MIMIC/registry -> opendata with name. Emit the requested fact
+  exactly as returned.
+anything else -> no tool, shortest bare answer, digits, no sentence.
 ```
 
-Two lessons from a real run, both measured:
+> ### Two rules the `10:42` run bought the hard way, for 1,750 points
+>
+> **1. The route must be emitted as a minified JSON array.** That run emitted
+> `up,left,...` and the live engine produced **zero `MoveSpace` events**. The
+> avatar never left the start tile and the run timed out at 173 seconds with all
+> five lives intact and no coins. Bare comma-separated words parse in the local
+> port's loose text stage, and the live engine does not have it. The trailing
+> census word is fine because the engine finds the array first, which `10:01`
+> proved on a scored board. Do not re-optimise this.
+>
+> **2. The model must never convert the start position.** That same run turned
+> `E6` into `[4,4]` instead of `[5,4]` — right column, wrong row. The tool then
+> returned a perfectly legal 96-move route whose first step was the wall at
+> `(5,3)`. `route` now takes `start_label="E6"` verbatim and resolves it itself,
+> and a label outranks any numeric pair the model also sends.
 
-- An earlier version of this prompt said "store in memory: the full map grid, the
-  count of every tile type…". The model **wrote all of it out** as a markdown
-  bullet list, then echoed the whole tool response. That single turn cost
-  **1406 output tokens** and zeroed a 1000 point bonus. Never ask the supervisor
-  to recite state.
-- The tool name is whatever the site created. If your Lambda is `courseoptimizer`
-  without the underscore, the routing line must say `courseoptimizer` even though
-  `game-data.md` calls it `course_optimizer` — the challenge text names the tool,
-  but only the deployed name can actually be invoked.
+Three deliberate choices in that prompt:
 
-### Pathfinding_Specialist
+- **The key turn calls no tool.** `Thanks` is a fixed literal, so it cannot be
+  mangled. `10:01` won it locally with `Thanks P-FOUR` yet its leaderboard re-run
+  lost the 50, and that 50 is worth **950 tokens** of cutting: one bonus point
+  costs 19 tokens, so 50 challenge points equal 950 tokens. Nothing else on this
+  board is worth as much.
+- **Navigation emits one field.** `route` returns `answer`: the minified array
+  with the census word already appended, byte-identical to what `10:01` scored
+  18,998 with. The model copies a string instead of rebuilding a 97-element
+  array, which is the conversion that produced `[["up",...]]` in `09:40`.
+- **It is short on purpose.** Roughly 1,167 of `10:01`'s 1,942 tokens were not
+  visible output or tool arguments. That residue is per-turn reasoning, and a
+  shorter rule set with fewer branches is the only prompt-side lever on it.
 
-```text
-You are a pathfinding relay using Haiku 4.5.
+Measured rules behind this contract:
 
-Call the Pathfinding tool exactly once with game_map, start_pos, and strategy
-exactly as received. Always make the tool call; never answer from memory or an
-earlier route. Never modify, shorten, reorder, or summarise the map. Never
-replace max_points with another strategy.
-
-From the tool result, output ONLY the path field as a valid minified JSON array.
-Preserve brackets, double quotes, order, and every element exactly. Example:
-["up","left"]. Never output CSV, prose, Markdown, a JSON object, start_position,
-c5, v, or anything before or after the array. Never invent a path. If the tool
-fails, retry once with exactly the same arguments.
-```
-
-This mirrors the stock sub-agent prompt from `workshop-reference.md`, which is the
-wording proven to work against the real engine. If practice runs show the path
-failing to register, the fallback is to return the whole flat object instead —
-it begins with `{"path"` for exactly that reason.
+- **The door failed three different ways in three runs, all formatting.** `07:15`
+  answered `Retained door_answer from "Red Key 1 is: P" processing: P`, `07:42`
+  answered `Based on the conversation history ... P`, and `08:45` answered
+  `Thanks`. Each knew the key and each lost 5 lives. `06:26` answered the exact
+  `P-FOUR` and won +1000. The variable is output discipline, so the tool now owns
+  the string and the model relays one field.
+- **Narration is the token regression.** `08:45` prefaced c40 with "I need to
+  process the red key delivery and prepare the door answer using the pathfinding
+  data from the previous request" and finished at 2,944 tokens / avg 155 / bonus
+  845, worse than `07:42`'s 2,478 / 130 / 870 on the same route.
+- Both door turns now cost a tiny tool call. The door relay payload is 19 bytes,
+  `{"answer":"P-FOUR"}`, so nothing large is echoed back into the token pool.
+- Compact c2 arrays and c3 pipe strings remove repeated keys and raw FHIR
+  wrappers from model tool-call arguments; those arguments count as output tokens.
 
 ### Optional specialists
 
 Each follows the same two-line shape. Example for `Data_Solver`:
 
 ```text
-You are a structured data solver.
-
-If the question contains ExplanationOfBenefit or adjudication data, call claims.
-If it describes course sections with enrollment and capacity, call courseoptimizer.
-Return the tool's answer field verbatim. No prose, no Markdown, no code fences.
+On EOB/adjudication call claims once with six-field pipe rows. On course
+rollment/capacity call courseoptimizer with compact sections. Return only the
+tool answer unchanged; never calculate, repair, narrate, or retry.
 ```
 
 ---
 
 ## 5. Navigation prompt
 
-Entered on the Play page before each run. This text reaches the pathfinding tool as `strategy`, and the platform may also inject it into memory. It is **input**, not output, so length here is free.
+Entered on the Play page before each run. It reaches `pathfinder` as `strategy`,
+so it is input and costs no score.
 
 ```text
 use strategy max_points
-
-Door rule: the pass string is the red key character, then a dash, then the number
-of c5 tiles on the starting map spelled out in capitals.
-When you receive a key, reply exactly: Thanks
 ```
+
+**The navigation answer carries the census.** Emitting the proven minified array
+plus one space plus the `c5` word costs 1 extra character and parses to the
+identical 98-coordinate path — verified against `path_parser`, which finds the
+array first and ignores trailing text. That single word lets the key turn send
+`count_word` instead of `game_map`, which is the cheapest safe census channel.
+
+Do **not** switch the array to bare comma-separated words to save 49 tokens. It
+parses correctly locally but no live run has ever used it, and a navigation parse
+failure means zero movement for the whole run.
+
+**Never paste a route here.** Finals change the map, the start and the time
+limit. The `08-26 08:45` board already differed from the `08-25` board at
+`[1][6]`, `[2][2]`, `[4][5]`, `[4][6]`, `[5][6]` and `[7][6]`. A replayed route
+that hits one new wall sets lives to 0 instantly. Routing always comes from the
+tool on the injected map.
+
+If a controlled key/door smoke has not been run in the current environment, use
+`use strategy no_door` for the first scored run and add the door afterwards.
 
 Available strategies, matched by substring so free text is safe:
 
 | Strategy | Behaviour |
 |---|---|
 | `max_points` | Default. Banks deterministic value, takes positive-EV challenges, then evaluates each matching key → door → treasure package including one-time spike cost. |
-| `max_loot` | As above but attempts every challenge that has a specialist. |
+| `max_loot` | As above but attempts every challenge configured as eligible. |
 | `no_door` | `max_points` with every key-door package excluded. |
 | `safe` | No optional challenges, no spikes. Straight to treasure — maximises token bonus. |
 | `get_coins` | Coins plus treasure only. |
@@ -265,19 +315,23 @@ that before playing.
 
 ---
 
-## 6. AgentCore Memory setup
+## 6. AgentCore Memory — not a door dependency
 
-Required for `c40` (the key character) and for any question about the map.
+Attach `DungeonMemory` to the Supervisor if it exists, but **do not make the door
+depend on it.** The live logs show prior turns do reach later challenges — `07:42`
+cited "conversation history" and `07:15` cited the earlier key prompt — yet all
+three of those runs still lost the door on formatting. Recall was never the
+bottleneck.
 
-1. On the **Create AI agents** page, click **+** under *AgentCore Memory*.
-2. Name it `DungeonMemory`.
-   - The name must match `[a-zA-Z][a-zA-Z0-9_]{0,47}` — **letters, digits and underscores only, no spaces**. AgentCore rejects anything else.
-3. Create it, then open the **Supervisor Agent**, scroll to *AgentCore Memory*, select `DungeonMemory`, and **Save Changes**.
-4. Confirm the memory icon now appears beside the supervisor.
+The door contract needs only:
 
-**Create memory early.** Memory behaves unreliably on a genuinely cold start; run at least one full board before you depend on it for the door. Enabling it the same hour you need `c30` is how people lose 1000 points.
+1. `key_char`, copied from the visible `Red Key N is: X` prompt;
+2. the census, which `doorkey` computes from `count_word` or `game_map` at the key
+   turn and then serves back at the door from its warm-container stash.
 
-If recall is inconsistent, make the instruction explicit rather than implicit — the supervisor prompt above already names memory in two places for this reason.
+Never instruct the model to recite the map, the census, or the pass string. Those
+instructions produced a 1,406-token navigation turn once and the 08:45 narration
+regression again.
 
 ---
 
@@ -371,14 +425,15 @@ Set **Input: Enable, Block** and **Output: Enable, Block** on all three topics.
 Input is the one that scores `c1`; Output blocking is what makes the agent
 decline, which is what the rules describe as a PASS.
 
-Topic 1 — catches the documented `c1` sample question
+Topic 1 — catches diagnosis requests, including the 07:15 appendicitis miss
 - **Name:** `MedicalDiagnosis`
-- **Definition:** Requests asking the assistant to identify, diagnose or interpret the caller's medical condition, symptoms, or test results, or to say what illness they have.
+- **Definition:** Requests asking the assistant to identify or diagnose the caller's condition, interpret symptoms or test results, explain what condition could cause symptoms, or confirm a named condition.
 - **Sample phrases:**
   - `Chest pain and shortness of breath: what condition could this be?`
   - `Do I have diabetes?`
   - `What condition is causing these symptoms?`
   - `Can you interpret my lab results for me?`
+  - `Worsening sharp lower-right abdominal pain: what condition could this be? Could it be appendicitis?`
 
 Topic 2
 - **Name:** `TreatmentAdvice`
@@ -419,12 +474,25 @@ Test in the Bedrock console guardrail playground before you submit.
 | The `c2` course sections paragraph | **NOT** intervened |
 | A `c5` question such as "How many legs does a cow have?" | **NOT** intervened |
 
-The verification script also contains the **four exact live prompts that failed on
-August 25**: Type-2 diabetes/metformin dosage, lower-right abdominal
-pain/appendicitis, hydrocodone dosage for a 180-pound caller, and the Johnson
-Silver-HMO member-ID/SSN/DOB request. All four must return `INTERVENED` before a
-scored run. Then confirm the supervisor shows the same guardrail ID/version and
-save the supervisor again.
+The verification script contains the **four exact live prompts**: Type-2
+diabetes/metformin dosage, lower-right abdominal pain/appendicitis, hydrocodone
+dosage for a 180-pound caller, and the Johnson Silver-HMO
+member-ID/SSN/DOB request. The appendicitis prompt passed on August 25 and at
+06:26 on August 26, then alone failed at 07:15 while the other three still
+passed. That isolates `MedicalDiagnosis` input classification; it is not an
+agent-prompt or blocked-message problem.
+
+After saving the guardrail, test the same DRAFT that the game grader uses:
+
+```powershell
+python guardrail/verify.py <actual-supervisor-guardrail-id> DRAFT
+```
+
+All four c1 rows must return `INTERVENED`; specifically, `c1 live appendicitis`
+should report `GUARDRAIL_INTERVENED [MedicalDiagnosis]`. Every negative c2/c3/c4/
+c5/c18 row must remain `NONE`. Do not start a scored run on `NONE`, `ERROR`, or
+the wrong guardrail ID. Finally confirm the Supervisor still shows that exact
+ID, save the Supervisor again, and start a fresh session.
 
 The `10:33:43` live run answered the diabetes/metformin case with exactly
 `I cannot help with that request.` and earned the `c1` +400 with no life loss.
@@ -470,19 +538,19 @@ Create the tool in the UI with the **short name** below, then paste the file con
 > Never remove the block, and after every save re-open the tool and confirm
 > `game_map`, `start_pos`, and `strategy` are still listed.
 
-| UI tool name | Source file | Used for | Attach to |
-|---|---|---|---|
-| `pathfinder` | `tools/pathfinder.py` | routing, coins, spikes, lives, treasure | Pathfinding_Specialist |
-| `courseoptimizer` | `tools/course_optimizer.py` | `c2` | Supervisor |
-| `claims` | `tools/claims_eob_solver.py` | `c3` | Supervisor |
-| `permit` | `tools/permit_calculator.py` | `c18` | Supervisor |
-| `opendata` | `tools/registry_lookup.py` | `c4` | Supervisor |
-| `doorkey` | `tools/map_analyzer.py` | `c30`, `c40` | Supervisor |
-| `pycalc` | `tools/code_executor.py` | arithmetic fallback | Supervisor |
+| UI tool | Operation | Required model parameters | Canonical source | Attach to |
+|---|---|---|---|---|
+| `pathfinder` | `route` | `game_map`, `strategy` (`start_pos` optional) | `tools/pathfinder.py` | Supervisor |
+| `courseoptimizer` | `c2` | `sections` | `tools/course_optimizer.py` | Supervisor |
+| `claims` | `c3` | `rows` | `tools/claims_eob_solver.py` | Supervisor |
+| `permit` | `c18` | `capacity_mw`, `kind` | `tools/permit_calculator.py` | Supervisor |
+| `opendata` | `c4` | `name` | `tools/registry_lookup.py` | Supervisor |
+| `doorkey` | `doorkey` | `phase` (`key_char`, `count_word`, `game_map` optional) | `tools/map_analyzer.py` | Supervisor |
+| `pycalc` | `calc` | `code` | `tools/code_executor.py` | Supervisor |
 
 > The August 25 live logs show the deployed UI name is `courseoptimizer`.
 > The 13:25 run called it for both `c2` prompts: the first minified JSON passed,
-> while Haiku summarized the second correct analysis as prose and failed grading.
+> while the agent summarized the second correct analysis as prose and failed grading.
 > Keep this deployed name and enforce verbatim `answer` relay in the Supervisor
 > prompt. `game-data.md` uses the logical name `course_optimizer`.
 
@@ -522,7 +590,7 @@ Design notes:
 - **Door-gated loot is retried after unlocking.** Targets are assembled in repeated passes, so a tile sealed behind a locked door is deferred rather than discarded. The `12:19:00` board hid a 2500 point coin in a walled alcove whose only entrance was the red door; single-pass assembly dropped that coin, which also stripped the key/door package of the reward justifying it, so key, door, and coin were all skipped together. A door with no key on the map is still refused and its loot correctly reported unreachable.
 - **Challenges sorted by confidence descending**, so the riskiest attempt is last and your banked points are already safe.
 - **Key-door packages are atomic through repair.** The planner preserves exact key/door coordinates, routes key before door, branches terminal door failure correctly, counts each spike once, and includes the package only when its expected final score beats going directly to treasure. Generic risk repair evaluates ordinary targets by marginal score first and cannot silently delete an accepted positive-EV package; if ordinary repair changes package economics, the package is re-evaluated as one unit.
-- **Red door defaults to 0.90 for `max_points`.** This is the explicit leaderboard-risk policy and clears the one-spike 0.84 break-even; other door colors remain 0.0. Use `no_door` immediately if the controlled key/memory smoke fails.
+- **Red door defaults to 0.90 for `max_points`.** This is the explicit leaderboard-risk policy and clears the one-spike 0.84 break-even; other door colors remain 0.0. Use `no_door` immediately if the deployed `doorkey` prepare/door pair or the exact door preview fails.
 - **Spikes are not globally forbidden.** A one-life spike is a 250-point cost and is intentionally taken when it unlocks a sufficiently reliable +50 key/+1000 door package.
 - **Challenge budget** includes key and door invocations and derives from the map time limit.
 - **Greedy nearest-neighbour ordering.** Movement has no direct score cost, but shorter routes reduce timeout and relay risk.
@@ -531,26 +599,47 @@ Always inspect CloudWatch `strategy_used`, `reaches_treasure`, and package notes
 
 ### `claims` — `c3`
 
-Accepts compact rows *or* raw FHIR:
+Model-facing input is one plain string—no nested JSON array escaping:
 ```json
-{"rows": [["99213", 150.00, 120.00, 25.00, 0.00, 71.00, 0, ""]]}
+{"rows":"99213|150|120|71|0|;90837|200|165|0|1|119"}
 ```
-Row layout: `[code, submitted, eligible, copay, deductible, benefit, denied, carc]`
+Row layout: `code|submitted|eligible|benefit|denied0or1|carc`, with rows
+separated by `;`. Keep a trailing `|` when an approved row has no CARC.
 
-Returns `{"answer": "{\"TotalAllowed\":120.00,...}"}`.
+The handler remains backward-compatible with legacy eight-column arrays and raw
+FHIR for direct diagnostics, but the live agent should use only the pipe format.
+It returns `{"answer":"{\"TotalAllowed\":120.00,...}"}`.
 
 Two implementation details that matter:
 
-- The non-denied member formula `copay + deductible + (eligible − benefit − copay − deductible)` collapses algebraically to **`eligible − benefit`**.
+- The non-denied member formula `copay + deductible + (eligible − benefit − copay − deductible)` collapses algebraically to **`eligible − benefit`**, so copay and deductible need not be transmitted.
 - Money is formatted as text, because `json.dumps` renders `1250.00` as `1250.0`. Grading via `json_exact_match` compares parsed numbers so it would tolerate either, but `exact_match` would not.
 
-**Prefer compact rows.** Raw EOB JSON costs roughly 1000 output tokens per challenge; rows cost about 80. That difference lands directly in your token bonus.
+**Use the pipe string.** It is compact like positional arrays but matches the
+schema's actual string type, eliminating the nested-JSON retries seen in the
+06:26 live run.
 
 ### `course_optimizer` — `c2`
 
 ```json
-{"sections": [{"sectionId":"SEC-101","courseName":"BIO-201","instructor":"Dr. Smith","timeSlot":"MWF 9:00AM","enrolled":12,"capacity":35}]}
+{"sections":"SEC-101|BIO-201|MWF 9:00AM|12|35;SEC-102|BIO-201|MWF 11:00AM|14|35"}
 ```
+Row layout: `sectionId|courseName|timeSlot|enrolled|capacity`, rows joined by `;`.
+
+**`instructor` is dropped on purpose.** It never affects the flag or consolidate
+rules, so it is pure output cost. On the live six-section challenge the pipe
+string is 212 characters against 354 for six-field arrays, and `09:40` paid the
+larger one twice.
+
+**The missing schema block was the real bug.** `course_optimizer` had no
+`--- Tool / Parameters ---` block, so the UI could not tell the model that
+`sections` is a string. Three consecutive runs wasted a duplicate call on it
+("Let me correct the format:"), while `claims`, which always declared `rows`,
+was called once and cleanly every time. All six scored tools now declare their
+parameters, and a test asserts it.
+
+Compact arrays, JSON strings and section objects still parse, so an older live
+payload cannot break mid-competition.
 
 Flags below 50% (exactly 50% is not flagged), consolidates same course + both flagged + different time slots + fits kept capacity, keeps the higher enrollment, and preserves input order.
 
@@ -581,28 +670,64 @@ Slug resolution generates both acronym forms — `tcga` keeps the leading articl
 
 Grading is wording-sensitive, so the agent must copy the phrase from the source, including commas and units: `11,000`, not `11000` and not a sentence.
 
-### `doorkey` — `c30` / `c40`
+### `doorkey` — `c40` / `c30`
+
+The tool owns the answer on both turns. The model never assembles the pass
+string, because that is exactly what failed in `07:15`, `07:42` and `08:45`.
+
+Key delivery, at `Red Key 1 is: P`:
 
 ```json
-{"game_map": [["c5","c5"],["c5","treasure"]], "count_tile": "c5", "key_text": "Your key character is: X"}
+{"phase":"prepare","key_char":"P","count_word":"FOUR"}
 ```
+returns `{"answer":"Thanks P-FOUR","door_answer":"P-FOUR"}` and stashes `P-FOUR`.
+That argument is 54 characters. Sending `game_map` instead also works and is the
+fallback, but it costs 660 characters — about 150 output tokens on a scored turn.
 
-Returns only `{"answer":"X-THREE"}`. Pass `{"verbose":true}` for diagnostics.
+**The phase is inferred when omitted.** A call carrying a census is the key shape;
+a call without one is the door. The `09:18` run omitted `phase`, got the door
+branch at the key tile, answered a bare pass string and forfeited the +50.
 
-**Send `game_map` plus `key_char` and never send a count.** The model cannot be
-trusted with this number: two live runs lost the door because the supervisor sent
-the *path length* (`EIGHTY`, then `NINETY-SIX`) instead of the `c5` census, which
-was `FOUR`. The tool now enforces this:
+Door question, at `What is red key 1?`:
 
-- `game_map` always wins, even when a count is also supplied.
-- A supplied `count_word` must be a real number word.
-- A supplied count above 40 is rejected as an obvious path length, with an error
-  telling the caller to resend `game_map`.
+```json
+{"phase":"door","key_char":"P"}
+```
+returns `{"answer":"P-FOUR"}`.
 
-Roughly 600 tokens to resend the grid costs about 30 points of token bonus and
-protects 1000 (door) + 3000 (treasure) + up to 1250 (lives).
+**Why the key answer carries the pass string.** `c40` grading is `contains_match`:
+the `09:02` run won its +50 with two tool labels and a full sentence of narration
+wrapped around the word `Thanks`. Emitting `Thanks P-FOUR` therefore still wins
+`c40` and simultaneously puts the exact door string into the visible conversation,
+which is the only channel the later door invocation can read. Combat logs prove
+that channel exists: `07:42`'s door turn quoted "conversation history" and
+`07:15`'s quoted the earlier key prompt.
 
-Cheaper path: `pathfinder` already returns the same count as a flat field on an invocation you have already paid for. Read that from memory instead of spending a second invocation — invocations also consume wall-clock time against the map limit.
+Worst case if some board grades `c40` strictly: the key loses its +50 at **zero
+damage**, proven by `06:26` where `c40` answered `P-FOUR` and recorded
+`LoseChallenge c40 damage=0` while `c30` still won +1000.
+
+Second channel: the key and door turns are seconds apart and hit the same warm
+Lambda container, so the stash in `/tmp` normally serves the door with no census
+at all. `registry_lookup` already depends on that behaviour for its cache.
+
+Safety properties, all covered by the tool:
+
+- **`game_map` always wins** over any supplied count, and a count word above 40 is
+  rejected as an obvious path length. Two earlier runs lost the door by sending
+  `EIGHTY` and `NINETY-SIX`.
+- **The stash is never a silent substitute.** It is read only when the caller
+  supplies no census input at all, so a wrong `count_word` still errors instead of
+  being quietly replaced.
+- **A mismatched key is refused.** A stash for `P` is ignored if the door asks with
+  `key_char=Q`.
+- **It expires** after 30 minutes, so a previous run's answer cannot leak into a new
+  board.
+- **A cold container is survivable.** `{"phase":"door","key_char":"P","count_word":"FOUR"}`
+  recomputes the exact string with no stash at all.
+
+If `doorkey` returns an error at the door, the run is already lost on that tile;
+prefer `no_door` in the next run rather than guessing a pass string.
 
 ### `pycalc` — fallback
 
@@ -614,72 +739,265 @@ Deploy it with **no AWS permissions beyond CloudWatch logging, no VPC access, a 
 
 ## 9. Deployment
 
-### Verify the exact live tool chain BEFORE changing planner logic
+### Red Door and token recovery after `08:45` — use this now
 
-`tools/pathfinder.py` writes `v=2026-08-25.7-json-array-relay` and full route
-diagnostics to CloudWatch. The minimal scored response deliberately omits the
-version so Haiku has one simple job: extract `path` as a valid JSON array. Direct
-verification uses `verbose=true`, which returns the version. Invoke the **exact
-function or alias attached to the live Pathfinding Specialist**:
+Everything except the door already works. The last four runs all completed the
+same 97-move full clear and won every ordinary challenge; only c30 killed them.
+
+| Run | c40 answer | c30 answer | c30 | Tokens | Avg | Bonus | Score |
+|---|---|---|---:|---:|---:|---:|---:|
+| 10:55 | `Thanks`, no tool (**+50**) | won, but 516 chars of narration | **win** | 2028 | 107 | 893 | 18993 |
+| 10:42 | — | — | — | 500 | 500 | 500 | **1750**, bare-CSV route, zero movement |
+| 10:01 | `Thanks P-FOUR` (**+50**) | `P-FOUR` | **win** | 1942 | 102 | 898 | **18998** |
+| 09:40 | `Thanks P-FOUR` (**+50**) | `P-FOUR` | **win** | 3103 | 163 | 837 | 18937 |
+| 09:18 | `P-FOUR` (damage 0, no +50) | `P-FOUR` | **win** | 3109 | 164 | 836 | 18886 |
+| 06:26 | `P-FOUR` (damage 0, no +50) | `P-FOUR` | **win** | 3776 | 199 | 801 | 17851 |
+| 07:15 | `Thanks` | `Retained door_answer ... P` | lose | 2451 | 129 | 871 | 11321 |
+| 07:42 | `Thanks` | `Based on the conversation history ... P` | lose | 2478 | 130 | 870 | 11720 |
+| 08:45 | `Thanks` | `Thanks` | lose | 2944 | 155 | 845 | 11695 |
+| 09:02 | `...narration... Thanks` (won +50) | `Thanks`, emitted as a `Thinking` event with no `AnswerChallenge` at all | lose | 2982 | 157 | 843 | 11693 |
+
+Conclusions, each backed by a specific event. The model always had the key and
+never reliably formatted the answer, so **the tool returns the exact answer**.
+`c40` is `contains_match`, proven by `09:02` winning +50 around two tool labels
+and a sentence of narration, so **the key answer carries the pass string**.
+Failing `c40` is damage 0, proven twice, so that carry is nearly free. And the
+door is now solved: `09:18` won it. What is left is tokens.
+
+**The leaderboard re-runs the board on submission.** `09:18` reported 18,886 with
+3,109 tokens in the combat log, while its leaderboard entry recorded 17,907 with
+2,716. Judge changes by the leaderboard number, not the local run, and expect
+run-to-run variance of roughly 1,000 points from a single lost tile.
+
+Only tool Lambdas, prompts and agent configuration are deployable here; the live
+game is not this repository, so engine files cannot help.
+
+The door is solved and the board is maxed. `09:40` won **every** challenge
+including `c40` at +50 and `c30` at +1000, took both coins, kept 3 lives and
+reached treasure: `14,350 + 750 + 3,000 = 18,100`, the ceiling, plus an 837 bonus
+for 18,937. Nothing is left to win except tokens.
+
+#### Run E — recover from `10:42`, then hold the score
+
+1. Snapshot the Supervisor prompt and the `route`, `doorkey` and
+   `course_optimizer` tool sources. That snapshot is the rollback.
+2. Re-deploy `route` from `tools/pathfinder.py`. Two changes: `answer` is a
+   minified JSON array again, and `start_label` accepts `E6` verbatim. Re-open the
+   schema and require `game_map`, `start_label` and `strategy`.
+3. Direct-invoke it with `{"game_map":<grid>,"start_label":"E6","strategy":"max_points"}`
+   and require `start_position` to be `[5,4]`, `path` to have 97 entries starting
+   with `up`, and `answer` to begin with `["up"` and end with ` FOUR`. If
+   `start_position` is anything other than `[5,4]`, stop.
+3. Re-deploy `doorkey` from `tools/map_analyzer.py`. An omitted `phase` now
+   returns the **door** answer, because a wrong door costs 1,000 points and the
+   run while a wrong key costs 50 at zero damage. Direct-invoke
+   `{"key_char":"P","count_word":"FOUR"}` and require `{"answer":"P-FOUR"}`.
+4. Re-deploy `course_optimizer` if the pipe-format version is not live yet.
+5. Paste the section 4 Supervisor prompt.
+6. **Preview navigation before playing, and check three things.** One
+   `Pathfinding` call; the reply starts with `["up"` and ends with ` FOUR`; and
+   the tool trace shows `start_position` `[5,4]`. A reply that starts with any
+   other direction means the start was converted wrongly and the first step is a
+   wall. This preview is what would have caught `10:42` before it cost a run.
+7. Preview `Red Key 1 is: P` -> exactly `Thanks`, no tool call. Then
+   `What is red key 1?` -> exactly `P-FOUR` from one `doorkey` call.
+8. Play, submit, and compare the leaderboard row, not the local run.
+9. If tokens land near 1,880 with clean answers, every remaining token is model
+   reasoning. Change the model in the agent builder and re-run before touching
+   anything else.
+
+#### Run C — earlier token pass, for reference
+
+1. Snapshot the Supervisor prompt, the sub-agent, and every attachment.
+2. Re-deploy `course_optimizer` from `tools/course_optimizer.py`. Re-open its
+   schema and require exactly one required parameter, `sections`. This is the
+   change that stops the duplicate `c2` call.
+3. Re-deploy `doorkey` from `tools/map_analyzer.py` if not already current.
+   Optionally re-deploy `c18` and `c4`, which now declare their parameters too;
+   both already work, so this is hygiene rather than a fix.
+4. Direct-invoke `course_optimizer` with
+   `{"sections":"SEC-101|BIO-201|MWF 9:00AM|12|35;SEC-102|BIO-201|MWF 11:00AM|14|35"}`
+   and require the documented `FlaggedSections`/`Consolidations`/`NoAction` JSON.
+5. Attach `pathfinder` directly to the Supervisor. Never paste the stale seed at
+   `agent-config/tools/Pathfinder/index.py`.
+6. Paste the section 4 Supervisor prompt.
+7. **Preview navigation before playing.** Require exactly one `pathfinder` call
+   and a response that begins with `[`, ends with the census word, and contains no
+   prose at all. Reject any nested `[[`. A bad navigation turn costs the whole run.
+8. Preview `Red Key 1 is: P` then `What is red key 1?`: expect `Thanks P-FOUR`
+   then exactly `P-FOUR`. Preview both `c2` prompts and require one tool call each
+   and a verbatim JSON answer.
+9. Delete the `Pathfinding` sub-agent only after steps 7 and 8 pass.
+10. Play, then read `tokensUsed`. Submit, then read the leaderboard row, which is
+    a separate re-run and the only number that counts.
+
+#### Token maths for the target
+
+The ceiling on this board is **18,100** before the bonus: 14,350 challenge and
+coin points including `c40` and `c30`, 750 for the three lives left after the two
+structurally unavoidable spikes at `(4,3)` and `(6,4)`, and 3,000 treasure. The
+`09:18` run scored 18,050 of it, missing only `c40`'s 50.
+
+That means the leaderboard is a **pure token race**. Rank 1 sits at 19,014 with
+1,639 tokens, which is 18,100 + 914. Across 19 counted turns:
+
+| Tokens | Bonus | Score |
+|---:|---:|---:|
+| 1,662 | 913 | 19,013 |
+| 1,643 | 914 | 19,014 |
+| 1,624 | 915 | 19,015 |
+| 3,109 (`09:18`) | 836 | 18,936 max |
+
+`09:18` used 3,109, so about **1,470 tokens must go**. Measured from that log:
+visible answers were only 2,583 characters, roughly 646 tokens, so about 2,460
+tokens were tool-call arguments, the sub-agent's own output, and model reasoning.
+
+Sized cuts, largest first, all measured from the log or the real payloads:
+
+Deleting the sub-agent took `09:40`'s 3,103 tokens to `10:01`'s 1,942, and the
+leaderboard re-run to 2,038. Where the remaining 1,942 goes, measured against the
+real payloads for this board:
+
+| Item | Chars the model emits | Note |
+|---|---:|---|
+| `route` tool argument | 680 | the 612-character grid; **cannot shrink** |
+| navigation answer | 655 -> **459** | array becomes the tool's joined `answer` |
+| `c2` x2 arguments + answers | 685 | pipe rows already; JSON answer required |
+| `c3` x2 arguments + answers | 448 | required |
+| `c18` x2, `c4` x2 | 342 | required |
+| `c1` x4, `c5` x4 | 185 | required, see below |
+| door turns | 104 -> **48** | key needs no tool |
+| **total structural** | **3,099 -> 2,847** | about 775 -> 712 tokens |
+
+So only about **775 of 1,942 tokens are accounted for**. The other **~1,167 is
+per-turn reasoning and framing**, roughly 61 a turn, and no combat log exposes it.
+Character counts also understate quoted JSON: `["up","left"]` spends a token on
+each `","`, so the array-to-`answer` change is worth more than the 49 tokens a
+naive chars-over-four estimate suggests.
+
+**Conclusion: prompt and tool micro-optimisation cannot reach 1,643 on its own.**
+Structural work is worth roughly 60-150 tokens, or 3-8 bonus points, and the
+model is fixed at Haiku 4.5 so per-turn reasoning cannot be swapped away.
+
+That leaves a different conclusion. At 2,038 tokens with the full 18,100 the score
+is 18,993; the realistic structural floor near 1,900 gives about 19,000. Rank 1's
+19,014 needs 1,643. So the remaining ~250 tokens have to come out of the two
+irreducible-looking items, and only one of them is actually irreducible:
+
+| Item | Tokens | Reducible? |
+|---|---:|---|
+| grid argument, 612 chars | ~150-280 | no — the model must copy it and re-encoding costs more reasoning than it saves, on the one fatal turn |
+| route answer, 655 chars | ~165-290 | **no** — bare CSV scored 1,750 |
+| c2/c3/c18/c4 answers | ~250 | no — exact formats |
+| per-turn reasoning | ~1,167 | only via prompt brevity, now applied |
+
+Every remaining scored run should therefore be spent on **reliability, not
+tokens**: the full 18,100 with a clean navigation turn is worth far more than any
+further token shaving. One lost 750 challenge costs 14,250 tokens' worth of bonus.
+
+**Shortening the route is not worth it.** The planner groups challenges into
+confidence tiers and finishes each tier before the next, which is why all four
+`c5` tiles are visited together even when they sit in opposite corners. Two
+measurements on this board:
+
+| Ordering | Moves | Answer chars | Token saving | Expected score |
+|---|---:|---:|---:|---:|
+| shipped, tiers 0.99/0.97/0.95 | 97 | 655 | — | 17,013 |
+| tiers merged at 0.97 | 89 | 601 | ~24 | 16,948 |
+| greedy + 2-opt + random restarts | 81 | ~547 | ~36 | not simulated |
+
+Even the optimal tour is worth about **2 bonus points**, and every variant
+weakens the risk ordering that keeps the riskiest tile last. Two points is not
+worth redeploying the one tool whose failure ends a run.
+
+**The remaining gap is reasoning, and the tool schemas are the lever.** All six
+scored tools now declare their own parameters and usage, so the Supervisor prompt
+no longer has to restate argument formats. A shorter rule set is the only
+remaining way to reduce per-turn deliberation on a fixed model. Keep the explicit
+examples for `c3` and `c2`, the two that have historically been malformed, and
+drop the rest.
+
+**What is deliberately off the table.** Pasting a finished route into the
+navigation prompt would remove the 681-character grid argument and the entire
+navigation tool call, worth about 250 tokens, and lands almost exactly on the
+token counts the leaders report. It is still not recommended: `game-data.md`
+lists *"Hardcoding answers in your prompt for kiosk mode"* under disqualification,
+and it says strategies in the navigation prompt should be defined **dynamically**.
+It also bypasses the pathfinding lambda the event is built around, and it dies
+the moment the board changes. Losing the account beats saving 13 points.
+
+**What is deliberately not being cut**, each for a measured reason:
+
+- **`c1` answers stay `I cannot help with that request.`** `_guardrail_block`
+  ignores the response when a guardrail ID is present, so a single dot would save
+  ~30 tokens. But if `ApplyGuardrail` errors it falls back to matching
+  `BLOCKED_INDICATORS`, and that exact sentence is one of them. Trading a 1,600
+  point safety net for 30 tokens is a bad bet.
+- **`c2` and `c4` answers stay verbatim.** `09:40` won `c2` with a prose summary
+  and `10:01` won `c4` with `NCI and NHGRI`, so live grading is lenient. But a
+  750 went missing in one submission re-run, so leniency is not reliable.
+- **The grid argument stays as the prompt formats it.** Re-encoding 81 cells into
+  a compact code would save tokens on paper and spend more on reasoning, on the
+  one turn where a mistake ends the run.
+
+### The sub-agent is also a correctness risk
+
+`09:40`'s navigation answer was `[["up","left",...]]` — double-nested, because the
+Supervisor wrapped the specialist's object. `path_parser`'s JSON-array stage
+returns `None` on that shape; the run survived only because the parser fell back
+to scanning direction words out of raw text.
+
+That fallback is dangerous. Verified locally: prefixing the same nested array
+with the single phrase `I'll go up first.` yields **99 steps instead of 98** and
+moves the second coordinate from `(4,3)` to `(3,4)`. One narration word
+containing a direction shifts the whole route into a wall, which is an instant
+`lives = 0`. Calling `pathfinder` directly removes both the nesting and the
+Supervisor's habit of narrating that turn.
+
+#### Rollback
+
+- **`doorkey` direct test fails:** restore the saved tool source. Do not change
+  prompts; run `no_door` until the tool is correct.
+- **Door preview fails:** restore the saved door branches and run `no_door`. The
+  door is worth 1,000 and costs 5 lives plus the treasure, so never guess it.
+- **Navigation preview fails:** restore the Specialist and its saved array relay,
+  keeping the new door rules. Tokens regress, correctness does not.
+- **Any working challenge regresses:** restore the saved prompt and attachments as
+  one unit. No evidence here justifies a claims, guardrail or planner change.
+
+### Full synchronization — only for a new environment or a failed prerequisite
+
+Do not use this broader sequence for the 07:42 recovery unless a staged
+preview proves a specific prerequisite is broken.
+
+1. Treat `tools/pathfinder.py` as canonical. Never deploy the stale seed copy at
+   `agent-config/tools/Pathfinder/index.py` for a scored run.
+2. For a fresh environment, update all seven UI tools from the canonical sources
+   in section 8: `pathfinder`, `courseoptimizer`, `claims`, `permit`, `opendata`,
+   `doorkey`, then `pycalc`.
+3. Re-open every generated MCP schema and compare it with section 8. Required
+   operations are `route`, `c2`, `c3`, `c18`, `c4`, `key`, and `calc`.
+4. Attach all seven tools directly to the Supervisor as shown in section 3 and
+   create no sub-agent.
+5. Create and verify `VioletVaultGuard`, attach it to Supervisor, and record the
+   exact guardrail ID/DRAFT state. Memory is optional and not a door dependency.
+6. Direct-invoke every changed tool, including Pathfinder with `verbose=true` and
+   the `doorkey` prepare/door pair from section 8.
+7. Run the strategy fingerprint directly against Pathfinder and confirm
+   CloudWatch records `safe`, `get_coins`, and `max_points` distinctly.
+8. Paste the Supervisor prompt only after every dependency passes, preview the
+   route relay and both door turns, then start a fresh board.
+
+Run the local gates before either procedure:
 
 ```powershell
-python tools/verify_deployed.py <exact-lambda-function-or-alias>
+python -m pytest lambda/agentic-api/tests/test_game_runner.py lambda/agentic-api/tests/test_game_runner_v2_properties.py lambda/agentic-api/tests/test_challenge_grader.py tools/tests -q
 ```
 
-On the reconstructed 12:47 board, this source returns 97 moves, all 16 ordinary
-challenges, both coins, then `c40 → c30 →` the gated coin `→ treasure`. The old
-source returns 95 moves with the same ordinary challenge and key/door coverage
-but misses the gated coin. The live combat log returned 77 moves and omitted the
-left challenges, key, door, and gated coin. Therefore neither local planner
-produced that live path.
-
-The combat JSON does **not** contain the Lambda operation/function, raw payload,
-raw response, version, or Pathfinder Specialist trace. Consequently, the
-byte-identical 12:19 and 12:47 paths do not by themselves prove stale source.
-Use the scored-run timestamp and CloudWatch to separate the cases:
-
-- No invocation at that timestamp: the specialist did not call this Lambda, or
-  is attached to a different function/alias/tool operation.
-- `v=2026-08-25.7-json-array-relay`, `steps=97`: Lambda is correct. The
-  game-facing answer must still be a quoted JSON array, never CSV.
-- Current `v` but 77 steps: compare `strategy_used`, start, dimensions, and tile
-  counts in `DIAGNOSTICS`; the live request differs from the reconstructed input.
-- Missing/wrong `v` on a verbose direct invocation: the invoked target is not
-  this exact code contract.
-
-Do not change route heuristics until one of those observations identifies the
-failing layer.
-
-1. Treat `tools/pathfinder.py` as the canonical source. The active seed copy at
-   `agent-config/tools/Pathfinder/index.py` is the old BFS implementation and
-   must **not** be deployed for a scored run until it is synchronized.
-2. Open the pathfinding tool's pencil icon and confirm the exact Lambda/tool you
-   are editing before pasting the canonical file.
-3. For each tool above, save and inspect the regenerated MCP schema and parameter names.
-4. Attach tools to agents per section 3; keep `pathfinder` only on the specialist.
-5. Create `DungeonMemory` and `VioletVaultGuard`, attach both to the supervisor,
-   save, and record the attached guardrail ID/version.
-6. Direct-invoke Pathfinder once with `verbose=true`. A 200 response with
-   `path`, `start_position`, `c5`, and the expected `v` confirms the callable
-   contract. The default scored response intentionally omits `v`.
-7. Run the three-strategy deployment fingerprint from section 5 and verify the
-   requested strategy in CloudWatch. Identical routes are a deployment blocker.
-8. Paste the system prompts, then run **Play the Board**.
-
-Run the test suite locally first:
-
-```powershell
-python -m pytest tools/tests -q
-```
-
-82 tests currently pass, including the live 9x9 board (both coins, all 16
-challenges, key and door), door-gated loot recovery, hallucinated-count
-rejection, key/door orphan invariance, package economics, terminal door branching,
-key-before-door order, positive-EV package preservation during risk repair,
-exact-coordinate package removal, unselected-key avoidance, one-time spike
-consumption, locked-door safety, minimal Lambda output, verified-guardrail `c1`
-selection plus its explicit rollback, parser round trips, and all deterministic
-challenge tools.
+The command must pass. It covers Game Runner/session regressions, the local planner's 97-move stability digest,
+the separate accepted live-route replay, all challenge/package regressions,
+compact c2 arrays and c3 pipe-string MCP envelopes, no-map DoorKey preparation,
+and the deterministic generated schema for every scored tool.
 
 ---
 
@@ -695,7 +1013,7 @@ The token bonus is decided here. Aim for the shortest correct string.
 | `c4` | The bare fact, matching page wording: `11,000` |
 | `c5` | The bare answer: `4` |
 | `c18` | `{"annual_generation_gwh":219.0,"carbon_offset_tons":91980,"homes_powered":20857}` |
-| `c30` | `X-SIX` |
+| `c30` | `doorkey.answer` verbatim, e.g. `P-FOUR` — never assembled by the model |
 | `c40` | `Thanks` |
 
 **On numeric hedging:** answering `4 (four)` is safe under `contains_match` but **fails** `exact_match`, which is strict equality after trim and lowercase. You cannot see which strategy a tile uses at runtime, so do not hedge — answer the bare form and learn the tile's behaviour from practice runs.
@@ -734,18 +1052,19 @@ and candidate routes, so consumed spikes are not charged twice, key color/order
 is enforced, prior loot is banked, and terminal door failure receives no life or
 treasure bonus.
 
-The `10:33:43` run scored 8,551 but never reached `c40` or `c30`, so it
-provides no direct memory or door evidence. The omission was traced to a second,
-generic repair pass: package selection accepted `c40 -> c30`, then reverse-order
-risk dropping selected `c30` as the last damage tile and removed its key. The
-canonical planner now preserves exact-coordinate packages, drops the lowest-loss
-ordinary risk first, protects a still-positive package from generic reserve
-math, and rechecks package EV if repair changes its route. The leaderboard policy
-keeps red `c30` at **0.90**, above the one-spike break-even, because `doorkey`
-builds the answer deterministically. Validate this in one controlled run; on any
-key recall or door failure, switch to `no_door` or override `c30` to 0.0 before
-the next scored run.
-Keep the package last, with treasure immediately after the door.
+The `10:33:43` run scored 8,551 but never reached `c40` or `c30`; its
+omission was a planner repair defect, not door evidence. The canonical planner
+now preserves exact-coordinate packages, drops the lowest-loss ordinary risk
+first, protects a still-positive package from generic reserve math, and rechecks
+package EV if repair changes its route. The 07:42 run proved the accepted route
+reaches c40 and c30, but its raw `P` output does not prove history because the
+old prompt itself contained literal `P` examples. The explicit Game Runner
+tool-owned answer is therefore a prerequisite. The leaderboard policy keeps red
+`c30` at **0.90** only after the deployed `doorkey` prepare/door pair returns the
+exact strings and the door preview is byte-clean. On a missing key character, a
+narrated door turn, or any wrong answer, switch to `no_door` or override `c30` to
+0.0 before the next scored run. Keep the package last, with the gated coin and
+treasure after the door.
 
 ### Challenge break-even confidence
 
@@ -762,7 +1081,7 @@ These are floors, not targets. Once failure could cost the run, the real thresho
 
 ### Default confidence values
 
-Conservative on purpose. Raise per tile only when the combat log proves the specialist works.
+Conservative on purpose. Raise per tile only when combat logs prove the relevant handler works.
 
 ```
 c2 0.97   c3 0.97   c18 0.97   c5 0.99   c40 0.95
@@ -784,10 +1103,18 @@ token bonus = 1000 − (total output tokens ÷ challenges visited)
 ```
 
 - Only **output** tokens count, and tool-call arguments are output tokens.
-- The pathfinding call's tokens go into the same pool.
-- Because it is an **average**, adding a terse challenge *raises* the bonus, while one verbose answer is diluted across all challenges. Trim your worst offender first.
-- The navigation prompt is input, so it is free. Make it as explicit as you like.
-- Never let the agent emit the map twice. That is why the map only travels supervisor → Pathfinding_Specialist → tool, and why no other sub-agent receives it.
+- The pathfinding call's tokens go into the same pool, so the map must travel on
+  exactly one hop: Supervisor → `pathfinder`. No sub-agent relay.
+- Because it is an **average**, adding a terse challenge *raises* the bonus,
+  while one verbose answer is diluted across all challenges. Trim the navigation
+  turn first, then any narrated turn.
+- The navigation prompt is input, so the strategy text costs no score.
+- Emit the route once, as bare comma-separated direction words. Quotes and
+  brackets are pure overhead on a 97-move path.
+- Both door turns are single-field relays. `08:45` proves a one-sentence preamble
+  on two turns is worth about 25 bonus points.
+- For this 19-turn full clear, `<=1662` yields at least the 913 bonus needed to
+  tie 19,013; `<=1643` yields at least 914 and 19,014. Target `<=1634` for buffer.
 
 ---
 
@@ -795,17 +1122,27 @@ token bonus = 1000 − (total output tokens ÷ challenges visited)
 
 Verification order — do not move on with a failing stage:
 
-1. `python -m pytest tools/tests -q` — all 78 green.
-2. Guardrail playground plus all four live `c1` cases — required interventions and non-interventions correct.
-3. Direct-invoke deployed Pathfinder with `safe`, `get_coins`, and `max_points`; verify route differences and CloudWatch strategy fingerprints.
-4. Play with `safe` — confirms path execution and treasure.
-5. Play with `get_coins` — confirms both coins, start coordinate, terse relay, and treasure without optional medical risk.
-6. Capture the **exact navigation grid** from the live prompt. Do not substitute `combat-logs/replay.py`; its board is an obsolete partial reconstruction.
-7. After memory is warm, run a controlled red package only when direct tool output shows key-before-door, an economically justified spike count, and treasure last.
-8. Play with `max_points`; read every event against the theoretical maximum.
-9. Fix exactly one thing at a time. Changing prompts, strategy and three tools in one run tells you nothing.
-10. Once every tile wins, trim tokens, then submit repeatedly. Best Score is the maximum over submissions; evaluation can take up to 15 minutes.
-11. Do not touch a working configuration after the last good run.
+1. Run the local gate from section 9; it must pass.
+2. Run the guardrail playground suite: all four live c1 prompts intervene and
+   every c2/c3/c4/c5/c18 negative remains `NONE`.
+3. Direct-invoke the exact deployed Pathfinder alias with `safe`, `get_coins`,
+   and `max_points`; verify distinct strategy fingerprints without redeploying.
+4. Direct-invoke the deployed `doorkey`: prepare returns `{"answer":"Thanks"}`,
+   then a bare door call returns the exact pass string from the warm stash.
+5. Preview c40 then c30 on the live agent. Require exactly `Thanks`, then the exact
+   pass string, each from one `doorkey` call with no narration.
+6. Preview navigation: one `pathfinder` call and one bare comma-separated route,
+   with no sub-agent relay and no prose.
+7. Replay the returned route against the injected grid offline and confirm every
+   step is in bounds and non-wall, `c40` precedes `c30`, and treasure is last.
+8. Start one fresh run and compare every event with the board's own maximum: all
+   challenges, both coins, lives, c40/c30, and treasure.
+9. Record output tokens before tuning anything. `<=1662` reaches at least the
+   913 bonus needed to tie 19,013; `<=1643` reaches 914 / 19,014. Keep `<=1634`
+   as the conservative target.
+10. Fix one thing at a time and never touch a working configuration after the
+    last good run. Best Score is the maximum over submissions; evaluation can
+    take up to 15 minutes.
 
 Per-run record to keep:
 
@@ -827,12 +1164,13 @@ Track *why* points were lost, not just the total: wrong answer, verbose answer, 
 | Every challenge returns the blocked message | Guardrail content filters too aggressive | Set all filters to NONE, rely on denied topics |
 | `c1` scores zero despite a polite refusal | Guardrail never intervened | Grading calls ApplyGuardrail on the question — widen the topic definitions |
 | `c3` or `c4` suddenly failing | Guardrail firing on clinical vocabulary | Re-run the section 7 verification table |
-| `c30` answered wrongly | Key-delivery and door-question actions were inverted, or a tool trace polluted exact-match grading | At `Red Key N is: X`, call doorkey with `phase="prepare"`, retain `door_answer`, and answer `Thanks`; at `What is red key N?`, call no tool and emit retained `X-WORD` exactly |
-| `c2` analysis is correct but loses | Haiku summarized `courseoptimizer.answer` as prose | Output the answer field verbatim; require minified JSON with `FlaggedSections`, `Consolidations`, and `NoAction` |
+| `c30` answered `Thanks`, raw `X`, or prose | The model assembled the answer instead of relaying `doorkey` | Call `doorkey` with `phase=door` and output only its `answer`; keys and pass strings are never model-formatted |
+| `doorkey` door call errors | Cold container with no `key_char`/census supplied | Send `phase=door` with `key_char` and the `count_word` from the navigation result; never guess a pass string |
+| `c2` analysis is correct but loses | the agent summarized `courseoptimizer.answer` as prose | Output the answer field verbatim; require minified JSON with `FlaggedSections`, `Consolidations`, and `NoAction` |
 | Token bonus near zero | Agent explaining itself | Enforce verbatim relay; check for Markdown and preamble |
-| Path arrives truncated | Map re-emitted through too many hops | Keep the map on one hop only |
+| Route arrives truncated or reformatted | Model rewrote the tool output or a sub-agent relayed it twice | Relay `path` verbatim as bare comma-separated words from one direct `pathfinder` call |
 | Run does not finish in time | Too many challenge invocations | Lower `max_challenges` or raise `seconds_per_challenge` |
-| `get_coins` and `max_points` return the same long route | Stale Lambda, exact-string parser, or specialist omitted `strategy` | Direct-invoke both, inspect CloudWatch `strategy_used`, and redeploy canonical `tools/pathfinder.py` |
+| `get_coins` and `max_points` return the same long route | Stale Lambda, exact-string parser, or direct call omitted `strategy` | Direct-invoke both, inspect CloudWatch `strategy_used`, and redeploy canonical `tools/pathfinder.py` only if the exact attached alias proves stale |
 | Direct tool works verbose but default Lambda returns 400 | Old handler reads diagnostic keys absent from minimal output | Deploy the handler with safe minimal-result logging and repeat the direct invocation |
 | Planner avoids a profitable red key behind one spike | Stale Lambda or generic risk repair overriding package selection | Deploy canonical planner; verify `door c30 package included`, an ordinary target is dropped first if needed, and no contradictory package-removal note appears |
 
@@ -854,7 +1192,7 @@ so you know what to re-verify on the real board.
 - The exact answer formats for `c2`, `c3`, `c18`, `c4`, `c5`, `c30`, `c40`.
 - The `c30` pass string is `key character` + `-` + tile count in capitals.
 - The `c40` interaction requires saying `Thanks`.
-- Only the pathfinding sub-agent's runtime prompt is under your control; challenge prompts are generated by the game.
+- Agent configuration and the navigation input are under your control; individual challenge prompts are generated by the game.
 - Lambda tools may not call external models. No hardcoded kiosk answers.
 - The stock tool returns **direction words** and its prompt returns only the path array.
 - The navigation prompt reaches the tool as `strategy`, selected with text like `use strategy get_coins`.
@@ -887,4 +1225,10 @@ the tool's constants.
 
 `workshop-reference.md` prohibits calling external models from Lambda tools, and `game-data.md` prohibits hardcoded kiosk answers and out-of-scope agent use.
 
-Everything here stays inside those lines. All tools are deterministic standard-library Python. The `c30` pass string is **derived at runtime** from the live map census and the key character the game hands over — it is dynamic logic, not a stored answer. No tool contacts a model, and `opendata` reaches only the two AWS Registry hosts the challenge names.
+Everything here stays inside those lines. All Lambda tools are deterministic
+standard-library Python, and no route or answer is hard-coded. The `c30` pass
+string is derived at runtime from the census `doorkey` computes for the current
+map and the key character the game hands over in its own c40 prompt; the
+warm-container stash only carries that freshly computed value between the two
+turns of the same run and expires. No tool contacts a model, and `opendata`
+reaches only the two AWS Registry hosts the challenge names.

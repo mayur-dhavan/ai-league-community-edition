@@ -1,0 +1,59 @@
+{
+  "events": [
+    {
+      "type": "InputPrompt",
+      "message": "use strategy max_points",
+      "position": {
+        "row": 5,
+        "col": 4
+      }
+    },
+    {
+      "type": "AnswerChallenge",
+      "message": "\n\n🔧 Using tool: PathfindingLambdaTarget-a04a___route\n\nleft,left,left,left,up,down,down,up,right,right,right,right,up,right,right,right,right,left,down,down,right,left,down,down,down,left,right,right,up,left,up,up,up,up,up,up,up,left,right,right,down,left,down,down,down,left,left,left,left,left,left,up,up,up,up,left,right,right,down,left,down,down,down,down,down,down,down,left,right,right,up,left,up,up,up,right,right,right,down,down,down,down,up,up,up,up,up,up,up,down,down,down,right,right,right,right FOUR",
+      "position": {
+        "row": 5,
+        "col": 4
+      }
+    },
+    {
+      "type": "LoseGame",
+      "timeElapsed": 173,
+      "position": {
+        "row": 5,
+        "col": 4
+      }
+    },
+    {
+      "type": "ScoreSummary",
+      "position": {
+        "row": 5,
+        "col": 4
+      },
+      "timeElapsed": 173,
+      "livesRemaining": 5,
+      "lifeBonus": 1250,
+      "coinsEarned": 0,
+      "tokensUsed": 500,
+      "challengesAttempted": 1,
+      "avgTokensPerChallenge": 500,
+      "tokenBonus": 500,
+      "treasureBonus": 0,
+      "totalScore": 1750,
+      "customModelCount": 0,
+      "customModelBonus": 0
+    }
+  ],
+  "summary": {
+    "timeRemaining": "4:50",
+    "livesRemaining": 5,
+    "lifeBonus": 1250,
+    "coinsEarned": 0,
+    "treasureBonus": 0,
+    "totalScore": 1750,
+    "tokensUsed": 500,
+    "challengesAttempted": 1,
+    "avgTokensPerChallenge": 500,
+    "tokenBonus": 500
+  }
+}

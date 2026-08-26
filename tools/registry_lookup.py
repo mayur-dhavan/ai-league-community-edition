@@ -243,7 +243,25 @@ def _parse_body(event: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def lambda_handler(event, context):
-    """Accepts {name}, optional {slug}, optional {max_chars}."""
+    """Return AWS Registry of Open Data facts for one dataset.
+
+    The AI League UI generates this tool's name and parameter list from the block
+    below. Keep it intact.
+
+    ---
+    Tool: c4
+    Description: Look up one AWS Registry of Open Data dataset. Send only the dataset name. Copy the requested fact from the result exactly, including commas and units, with no sentence around it.
+    Parameters:
+        name         (required) - the dataset name, for example The Cancer Genome Atlas
+    ---
+
+    ## Notes
+        - Grading is wording-sensitive: answer 11,000 not 11000 and never a sentence.
+        - Optional slug and max_chars exist for direct diagnostics only.
+
+    ## Returns
+        description, managed_by, update_frequency, license, tags
+    """
     try:
         body = _parse_body(event)
         name = str(body.get("name") or body.get("dataset") or body.get("question") or "")

@@ -4,6 +4,7 @@ Run from the tools directory:  python -m pytest tests -q
 Worked examples are taken verbatim from game-data.md.
 """
 
+import hashlib
 import json
 import os
 import sys
@@ -78,8 +79,11 @@ def test_claims_worked_example_from_fhir():
 
 
 def test_claims_compact_rows_match_fhir():
-    rows = [["99213", 150.00, 120.00, 25.00, 0.00, 71.00, 0, ""]]
-    assert claims_eob_solver.build_answer(rows) == claims_eob_solver.build_answer(FHIR_ITEM)
+    legacy_rows = [["99213", 150.00, 120.00, 25.00, 0.00, 71.00, 0, ""]]
+    pipe_rows = "99213|150|120|71|0|"
+    expected = claims_eob_solver.build_answer(FHIR_ITEM)
+    assert claims_eob_solver.build_answer(legacy_rows) == expected
+    assert claims_eob_solver.build_answer(pipe_rows) == expected
 
 
 def test_claims_denied_line_owes_submitted_and_reports_carc():
@@ -109,6 +113,139 @@ def test_claims_denied_lines_keep_input_order():
     ]
     parsed = json.loads(claims_eob_solver.build_answer(rows))
     assert [line["code"] for line in parsed["DeniedLines"]] == ["A1", "C3"]
+
+
+def _fhir_eob_wrapper(rows):
+    """Build the relevant full EOB shape used by the 2026-08-26 challenges."""
+    items = []
+    for sequence, row in enumerate(rows, 1):
+        code, submitted, eligible, copay, deductible, benefit, denied, carc = row
+        item = {
+            "sequence": sequence,
+            "productOrService": {"coding": [{"code": code}]},
+            "adjudication": [
+                {
+                    "category": {"coding": [{"code": category}]},
+                    "amount": {"value": amount, "currency": "USD"},
+                }
+                for category, amount in (
+                    ("submitted", submitted),
+                    ("eligible", eligible),
+                    ("copay", copay),
+                    ("deductible", deductible),
+                    ("benefit", benefit),
+                )
+            ],
+        }
+        if denied:
+            item["reviewOutcome"] = {
+                "decision": {"coding": [{"code": "denied"}]},
+                "reason": {"coding": [{"code": carc}]},
+            }
+        items.append(item)
+    return {"resourceType": "ExplanationOfBenefit", "item": items}
+
+
+@pytest.mark.parametrize(
+    ("legacy_rows", "pipe_rows", "expected"),
+    [
+        pytest.param(
+            [
+                ["99213", 150.0, 120.0, 25.0, 0.0, 71.0, 0, ""],
+                ["90834", 160.0, 130.0, 25.0, 0.0, 79.0, 0, ""],
+                ["90837", 200.0, 165.0, 0.0, 0.0, 0.0, 1, "119"],
+                ["96127", 25.0, 20.0, 0.0, 0.0, 16.0, 0, ""],
+                ["90846", 180.0, 145.0, 0.0, 0.0, 0.0, 1, "50"],
+            ],
+            (
+                "99213|150|120|71|0|;90834|160|130|79|0|;"
+                "90837|200|165|0|1|119;96127|25|20|16|0|;"
+                "90846|180|145|0|1|50"
+            ),
+            (
+                '{"TotalAllowed":270.00,"MemberResponsibility":484.00,'
+                '"DeniedLines":[{"code":"90837","carc":"119"},'
+                '{"code":"90846","carc":"50"}]}'
+            ),
+            id="failed-first-c3",
+        ),
+        pytest.param(
+            [
+                ["99213", 150.0, 120.0, 25.0, 0.0, 71.0, 0, ""],
+                ["E0601", 1800.0, 1400.0, 0.0, 0.0, 0.0, 1, "197"],
+                ["94010", 120.0, 95.0, 0.0, 0.0, 76.0, 0, ""],
+                ["94729", 85.0, 68.0, 0.0, 0.0, 0.0, 1, "151"],
+            ],
+            (
+                "99213|150|120|71|0|;E0601|1800|1400|0|1|197;"
+                "94010|120|95|76|0|;94729|85|68|0|1|151"
+            ),
+            (
+                '{"TotalAllowed":215.00,"MemberResponsibility":1953.00,'
+                '"DeniedLines":[{"code":"E0601","carc":"197"},'
+                '{"code":"94729","carc":"151"}]}'
+            ),
+            id="retried-second-c3",
+        ),
+    ],
+)
+def test_claims_logged_recovery_eobs_match_pipe_legacy_and_raw_fhir(
+    legacy_rows, pipe_rows, expected
+):
+    eob = _fhir_eob_wrapper(legacy_rows)
+    assert claims_eob_solver.build_answer(legacy_rows) == expected
+    assert claims_eob_solver.build_answer(eob) == expected
+    assert claims_eob_solver.build_answer(json.dumps(eob)) == expected
+    assert claims_eob_solver.build_answer(pipe_rows) == expected
+
+    response = claims_eob_solver.lambda_handler({
+        "parameters": [{"name": "rows", "value": pipe_rows}]
+    }, None)
+    assert response["statusCode"] == 200
+    answer = json.loads(response["body"])["answer"]
+    assert answer == expected
+    assert '"Benefits"' not in answer
+
+
+def test_claims_pipe_rows_preserve_decimals_and_denied_order():
+    rows = (
+        "A1|10.25|8.75|3.10|0|;"
+        "B2|4.55|3.00|0|1|197;"
+        "C3|6.05|5.25|1.20|1|50"
+    )
+    assert claims_eob_solver.build_answer(rows) == (
+        '{"TotalAllowed":8.75,"MemberResponsibility":16.25,'
+        '"DeniedLines":[{"code":"B2","carc":"197"},'
+        '{"code":"C3","carc":"50"}]}'
+    )
+
+
+def test_claims_generated_schema_keeps_rows_as_plain_string():
+    import inspect
+
+    os.environ.setdefault("AGENT_CONFIGURATIONS_TABLE", "SchemaOnly")
+    os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
+    os.environ.setdefault("AWS_ACCESS_KEY_ID", "testing")
+    os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")
+    agent_api = os.path.abspath(os.path.join(
+        os.path.dirname(__file__), "..", "..", "lambda", "agentic-api"
+    ))
+    if agent_api not in sys.path:
+        sys.path.insert(0, agent_api)
+    import agent_config_handlers
+
+    schemas = agent_config_handlers._try_parse_docstring_schema(
+        inspect.getsource(claims_eob_solver)
+    )
+    assert len(schemas) == 1
+    schema = schemas[0]
+    assert schema["name"] == "c3"
+    assert schema["inputSchema"]["required"] == ["rows"]
+    rows = schema["inputSchema"]["properties"]["rows"]
+    assert rows["type"] == "string"
+    assert rows["description"] == (
+        "semicolon rows code|submitted|eligible|benefit|denied0or1|carc"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -216,7 +353,8 @@ def test_pass_string_matches_documented_format():
 
 def test_count_tile_is_configurable():
     grid = [["c5", "c5", "c6"], ["c5", "normal", "treasure"]]
-    body = {"game_map": grid, "count_tile": "c5", "key_char": "Q"}
+    # phase="door" is the direct-diagnostic shape: ask for the pass string itself.
+    body = {"game_map": grid, "count_tile": "c5", "key_char": "Q", "phase": "door"}
     # The default response is deliberately just {"answer": ...} to save tokens.
     assert json.loads(map_analyzer.lambda_handler(body, None)["body"]) == {
         "answer": "Q-THREE"
@@ -232,11 +370,35 @@ def test_count_tile_is_configurable():
     assert result["answer"] == "Q-ONE"
 
 
+def test_door_is_the_default_answer_because_its_failure_is_the_expensive_one():
+    """A wrong key costs 50 at zero damage; a wrong door costs 1000 and the run.
+
+    So an omitted `phase` must resolve to the door pass string, never to the key
+    reply. The key turn answers with the literal `Thanks` and no tool call.
+    """
+    door = json.loads(map_analyzer.lambda_handler(
+        {"key_char": "P", "count_word": "FOUR"}, None
+    )["body"])
+    assert door == {"answer": "P-FOUR"}
+
+    explicit = json.loads(map_analyzer.lambda_handler(
+        {"key_char": "P", "count_word": "FOUR", "phase": "door"}, None
+    )["body"])
+    assert explicit == {"answer": "P-FOUR"}
+
+    # The key reply stays available for direct diagnostics.
+    prepared = json.loads(map_analyzer.lambda_handler(
+        {"key_char": "P", "count_word": "FOUR", "phase": "prepare"}, None
+    )["body"])
+    assert prepared["answer"] == "Thanks P-FOUR"
+    assert prepared["door_answer"] == "P-FOUR"
+
+
 def test_map_overrides_a_hallucinated_count_and_rejects_path_lengths():
     """Two live runs lost the Red Door by sending the path length as the count."""
     grid = [["c5", "c5"], ["c5", "c5"]]
     both = json.loads(map_analyzer.lambda_handler(
-        {"game_map": grid, "key_char": "P", "count_word": "NINETY-SIX"}, None
+        {"game_map": grid, "key_char": "P", "count_word": "NINETY-SIX", "phase": "door"}, None
     )["body"])
     assert both["answer"] == "P-FOUR"
 
@@ -461,9 +623,13 @@ def test_result_is_flat_so_the_engine_regex_matches():
     import re
 
     body = json.dumps(pathfinder.plan({"game_map": GRID}))
-    assert body.startswith('{"path":')
+    assert body.startswith('{"answer":')
     # Mirrors path_parser._try_json_path_object, which forbids nested braces.
+    # This still has to hold: if the model echoes the whole object instead of the
+    # answer field, the engine must recover the route from it rather than fail.
     assert re.search(r'\{[^{}]*"path"\s*:\s*\[.*?\][^{}]*\}', body, re.DOTALL)
+    start = tuple(pathfinder.plan({"game_map": GRID})["start_position"])
+    assert _engine_parser().parse_navigation_path(body, start) is not None
 
 
 def _engine_parser():
@@ -474,6 +640,95 @@ def _engine_parser():
     import path_parser  # noqa: PLC0415
 
     return path_parser
+
+
+def test_every_scored_tool_declares_its_parameters():
+    """A missing schema block makes the model guess the argument shape.
+
+    Three live runs in a row wasted a duplicate `courseoptimizer` call doing
+    exactly that ("Let me correct the format:"), while `claims`, which has always
+    declared `rows`, was called once and cleanly.
+    """
+    import inspect
+
+    os.environ.setdefault("AGENT_CONFIGURATIONS_TABLE", "SchemaOnly")
+    os.environ.setdefault("AWS_DEFAULT_REGION", "us-east-1")
+    os.environ.setdefault("AWS_ACCESS_KEY_ID", "testing")
+    os.environ.setdefault("AWS_SECRET_ACCESS_KEY", "testing")
+    sys.path.insert(0, os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+        "lambda", "agentic-api",
+    ))
+    import agent_config_handlers  # noqa: PLC0415
+
+    expected = {
+        pathfinder: ("route", ["game_map", "start_label", "strategy"]),
+        map_analyzer: ("doorkey", ["key_char", "count_word"]),
+        claims_eob_solver: ("c3", ["rows"]),
+        course_optimizer: ("course_optimizer", ["sections"]),
+        permit_calculator: ("c18", ["capacity_mw", "kind"]),
+        registry_lookup: ("c4", ["name"]),
+    }
+    for module, (name, required) in expected.items():
+        schemas = agent_config_handlers._try_parse_docstring_schema(
+            inspect.getsource(module)
+        )
+        assert len(schemas) == 1, f"{module.__name__} produced {len(schemas)} schemas"
+        assert schemas[0]["name"] == name, module.__name__
+        assert schemas[0]["inputSchema"]["required"] == required, module.__name__
+
+
+def test_c2_pipe_rows_solve_both_live_challenges_in_one_call():
+    """The five-field pipe row drops the unused instructor and needs no retry."""
+    rows = (
+        "SEC-101|BIO-201|MWF 9:00AM|12|35;SEC-102|BIO-201|MWF 11:00AM|14|35;"
+        "SEC-103|CHEM-301|TTh 10:00AM|28|30;SEC-104|PHYS-101|MWF 2:00PM|30|35"
+    )
+    answer = json.loads(
+        course_optimizer.lambda_handler({"sections": rows}, None)["body"]
+    )["answer"]
+    assert answer == (
+        '{"FlaggedSections":["SEC-101","SEC-102"],"Consolidations":'
+        '[{"keep":"SEC-102","cancel":"SEC-101","combinedEnrollment":26,'
+        '"capacity":35}],"NoAction":[]}'
+    )
+
+    rows = (
+        "SEC-1601|MHA-501|MW 6:00PM|7|25;SEC-1602|MHA-501|TTh 6:00PM|9|25;"
+        "SEC-1603|MHA-601|Sat 9:00AM|5|20;SEC-1604|MHA-601|Sat 9:00AM|4|20;"
+        "SEC-1605|MHA-701|MW 7:30PM|18|20;SEC-1606|MHA-710|TTh 7:30PM|16|20"
+    )
+    answer = json.loads(
+        course_optimizer.lambda_handler({"sections": rows}, None)["body"]
+    )["answer"]
+    assert answer == (
+        '{"FlaggedSections":["SEC-1601","SEC-1602","SEC-1603","SEC-1604"],'
+        '"Consolidations":[{"keep":"SEC-1602","cancel":"SEC-1601",'
+        '"combinedEnrollment":16,"capacity":25}],'
+        '"NoAction":["SEC-1603","SEC-1604"]}'
+    )
+
+
+def test_c2_still_accepts_the_previously_deployed_shapes():
+    """Never break a live payload while changing a tool mid-competition."""
+    arrays = [
+        ["SEC-101", "BIO-201", "Dr. Smith", "MWF 9:00AM", 12, 35],
+        ["SEC-102", "BIO-201", "Dr. Smith", "MWF 11:00AM", 14, 35],
+    ]
+    objects = [
+        {"sectionId": "SEC-101", "courseName": "BIO-201",
+         "timeSlot": "MWF 9:00AM", "enrolled": 12, "capacity": 35},
+        {"sectionId": "SEC-102", "courseName": "BIO-201",
+         "timeSlot": "MWF 11:00AM", "enrolled": 14, "capacity": 35},
+    ]
+    expected = json.loads(
+        course_optimizer.lambda_handler({"sections": arrays}, None)["body"]
+    )["answer"]
+    for payload in (json.dumps(arrays), objects):
+        answer = json.loads(
+            course_optimizer.lambda_handler({"sections": payload}, None)["body"]
+        )["answer"]
+        assert answer == expected
 
 
 def test_engine_parses_direction_output_back_to_the_same_route():
@@ -500,18 +755,94 @@ def test_engine_parses_coords_output_format():
     assert parsed == [tuple(step) for step in plan["coords"]]
 
 
-def test_default_response_is_minimal():
-    """The supervisor echoes the tool result, so every field costs output tokens.
+def test_start_label_removes_the_conversion_that_broke_the_10_42_run():
+    """The prompt states the start as a label; converting it is the model's job to lose.
 
-    A verbose response measured 1406 tokens on a real board and zeroed the
-    1000 point token bonus. Keep the default payload to three keys.
+    The 10-42 live run turned E6 into [4,4] instead of [5,4] — right column, wrong
+    row — and got a legal-looking 96-move route whose first step was the wall at
+    (5,3). A verbatim label cannot be off by one, so it wins over any numeric pair.
+    """
+    grid = [
+        ["c3",     "normal", "c3",     "wall",  "wall",   "wall",   "c18",  "normal", "c18"],
+        ["normal", "normal", "normal", "wall",  "c7",     "wall",   "normal", "normal", "normal"],
+        ["wall",   "c1",     "wall",   "wall",  "c30",    "wall",   "wall", "c1",     "wall"],
+        ["c5",     "normal", "wall",   "wall",  "normal", "normal", "normal", "normal", "c5"],
+        ["c7",     "normal", "normal", "c8",    "normal", "normal", "normal", "normal", "treasure"],
+        ["c5",     "normal", "wall",   "wall",  "normal", "normal", "c8",   "normal", "c5"],
+        ["wall",   "c1",     "wall",   "wall",  "c8",     "wall",   "wall", "c1",     "wall"],
+        ["normal", "normal", "normal", "wall",  "normal", "wall",   "normal", "normal", "normal"],
+        ["c4",     "normal", "c4",     "wall",  "c40",    "wall",   "c2",   "normal", "c2"],
+    ]
+    by_label = pathfinder.plan(
+        {"game_map": grid, "start_label": "E6", "strategy": "max_points"}
+    )
+    assert by_label["start_position"] == [5, 4]
+    # 85 moves since the distance-optimised tour replaced confidence-tier
+    # bucketing, which traversed the whole board once per confidence band and
+    # needed 97. Exact optimum for this board and fixed tail is 83.
+    assert len(by_label["path"]) == 85
+    assert by_label["path"][0] == "up"
+
+    # A label beats a wrong numeric pair rather than silently routing from it.
+    rescued = pathfinder.plan({
+        "game_map": grid, "start_label": "E6", "start_pos": [4, 4],
+        "strategy": "max_points",
+    })
+    assert rescued["start_position"] == [5, 4]
+    assert rescued["path"] == by_label["path"]
+
+    # The failure mode, for the record: the numeric pair alone routes from the
+    # wrong row and yields a different route whose first step leaves the start
+    # tile sideways instead of up. The length is not pinned because it moves with
+    # every routing improvement; the divergence is what matters.
+    wrong = pathfinder.plan({"game_map": grid, "start_pos": [4, 4], "strategy": "max_points"})
+    assert wrong["start_position"] == [4, 4]
+    assert wrong["path"] != by_label["path"]
+    assert wrong["path"][0] == "left"
+
+
+def test_default_response_is_minimal_and_carries_a_ready_answer():
+    """Diagnostics stay out; the emit-ready `answer` stays in.
+
+    A verbose response measured 1406 tokens on a real board and zeroed the 1000
+    point token bonus, so the payload keeps only four keys. `answer` is the exact
+    string the Supervisor emits, which is cheaper than a quoted array and needs
+    no conversion on the one turn where a malformed relay ends the run.
     """
     plan = pathfinder.plan({"game_map": GRID})
-    assert set(plan) == {"path", "start_position", "c5"}
+    assert set(plan) == {"answer", "path", "start_position", "c5"}
     assert "notes" not in plan
     assert "coords" not in plan
     assert "tile_counts" not in plan
-    assert len(json.dumps(plan, separators=(",", ":"))) < 400
+
+    # The emitted string MUST be a minified JSON array plus the census word.
+    # A bare comma-separated route produced zero movement on the live engine:
+    # the 10-42 run never left the start tile and scored 1,750.
+    assert plan["answer"] == (
+        json.dumps(plan["path"], separators=(",", ":")) + " " + plan["c5"]
+    )
+    assert plan["answer"].startswith('["')
+    assert plan["answer"].endswith(" " + plan["c5"])
+    assert '","' in plan["answer"], "must stay a quoted JSON array, never bare CSV"
+
+    # The emitted string must drive the engine to the same coordinates.
+    parser = _engine_parser()
+    start = tuple(plan["start_position"])
+    assert parser.parse_navigation_path(plan["answer"], start) == parser.parse_navigation_path(
+        json.dumps(plan["path"], separators=(",", ":")), start
+    )
+    # And the array itself must survive the strict JSON-array stage, not just the
+    # loose text fallback, because the live engine only has the strict one.
+    assert parser._try_json_array(plan["answer"], start) is not None
+
+
+def test_coords_output_format_answer_stays_engine_parsable():
+    plan = pathfinder.plan({"game_map": GRID, "output_format": "coords"})
+    parser = _engine_parser()
+    assert parser._try_json_array(plan["answer"], (0, 0)) is not None
+    assert parser.parse_navigation_path(plan["answer"], (0, 0)) == [
+        tuple(step) for step in plan["path"]
+    ]
 
 
 def test_verbose_adds_diagnostics_without_changing_the_route():
@@ -807,7 +1138,7 @@ def test_lambda_handler_succeeds_with_minimal_default_response():
     response = pathfinder.lambda_handler({"game_map": GRID}, None)
     assert response["statusCode"] == 200
     body = json.loads(response["body"])
-    assert set(body) == {"path", "start_position", "c5"}
+    assert set(body) == {"answer", "path", "start_position", "c5"}
 
 
 def test_c1_is_targeted_by_default_after_live_guardrail_verification():
@@ -941,7 +1272,63 @@ def test_zero_damage_coins_are_never_sacrificed_to_a_damage_budget():
     assert cells.index("c40") < cells.index("c30")
     assert cells[-1] == "treasure"
     assert plan["c5"] == "FOUR"
+    # Was 97 under confidence-tier ordering; the distance-optimised tour clears
+    # the same 20 tiles in 87 on this variant board.
+    assert len(plan["path"]) == 87
+    game_facing = json.dumps(plan["path"], separators=(",", ":"))
+    assert hashlib.sha256(game_facing.encode()).hexdigest() == (
+        "4e45db07643ed04d96d6839017d7f6a31c37ff7bc48375c210e5ba2b3bbb976a"
+    )
+    parsed = _engine_parser().parse_navigation_path(
+        game_facing, tuple(plan["start_position"])
+    )
+    assert parsed == [tuple(step) for step in plan["coords"]]
     assert not any("dropped" in note for note in plan["notes"])
+
+
+def test_named_recovery_log_route_replays_as_a_separate_bare_full_clear():
+    """Protect the accepted 06:26 route without conflating it with local output."""
+    bare_path = (
+        '["up","left","left","left","left","up","down","down","up",'
+        '"right","right","right","right","up","right","right","right",'
+        '"right","left","down","down","right","left","down","down",'
+        '"down","left","right","right","up","left","up","up","up",'
+        '"up","up","up","up","left","right","right","down","left",'
+        '"down","down","down","left","left","left","left","left",'
+        '"left","up","up","up","up","left","right","right","down",'
+        '"left","down","down","down","down","down","down","down",'
+        '"left","right","right","up","left","up","up","up","right",'
+        '"right","right","down","down","down","down","up","up","up",'
+        '"up","up","up","up","down","down","down","right","right",'
+        '"right","right"]'
+    )
+    assert hashlib.sha256(bare_path.encode()).hexdigest() == (
+        "e46dc7160cb0b2da790d706e34a3d9675182e1f3465cba19f7cffcdf438e7723"
+    )
+    assert bare_path.startswith("[") and bare_path.endswith("]")
+    assert "`" not in bare_path and "Pathfinding" not in bare_path
+
+    directions = json.loads(bare_path)
+    assert len(directions) == 97
+    parsed = _engine_parser().parse_navigation_path(bare_path, (5, 4))
+    assert parsed is not None and len(parsed) == 98
+
+    required_positions = {
+        (0, 0), (0, 2),                   # c3
+        (0, 6), (0, 8),                   # c18
+        (1, 4), (4, 0),                   # coins
+        (2, 1), (2, 7), (6, 1), (6, 7),  # c1
+        (2, 4),                            # c30
+        (3, 0), (3, 8), (5, 0), (5, 8),  # c5
+        (8, 0), (8, 2),                   # c4
+        (8, 4),                            # c40
+        (8, 6), (8, 8),                   # c2
+        (4, 8),                            # treasure
+    }
+    assert all(0 <= row < 9 and 0 <= col < 9 for row, col in parsed)
+    assert required_positions <= set(parsed)
+    assert parsed.index((8, 4)) < parsed.index((2, 4))
+    assert parsed[-1] == (4, 8)
 
 
 def test_unselected_key_is_avoided_when_a_detour_exists():
